@@ -20,11 +20,12 @@ const traffic: OpsTrafficSummary = {
   downstream: { original_bytes: null, actual_bytes: null, original_sample_count: 0, actual_sample_count: 0, paired_sample_count: 0, compression_percent: null }
 }
 const overview = { tps: { avg: 242.7 }, request_count_total: 99, traffic } as OpsDashboardOverview
+const HelpTooltipStub = { template: '<span><slot name="trigger" /></span>' }
 
 function mountHeader() {
   return mount(OpsDashboardHeader, {
     props: { overview, platform: 'openai', groupId: 7, timeRange: '6h', queryMode: 'preagg', loading: false, lastUpdated: null },
-    global: { stubs: { Select: true, HelpTooltip: true, BaseDialog: true, Icon: true } }
+    global: { stubs: { Select: true, HelpTooltip: HelpTooltipStub, BaseDialog: true, Icon: true } }
   })
 }
 

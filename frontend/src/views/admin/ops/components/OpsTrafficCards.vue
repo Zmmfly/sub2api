@@ -163,23 +163,19 @@ function compressionLabel(summary: OpsTrafficLink | undefined): string {
         <dd class="mt-1" :data-testid="`traffic-${side.key}-${metric.key}-row`">
           <div v-if="loading" class="h-9 w-28 animate-pulse rounded bg-gray-200 dark:bg-dark-700" aria-hidden="true"></div>
           <div v-else class="flex min-w-0 flex-wrap items-baseline gap-x-1 gap-y-1">
-            <span
-              class="min-w-0 text-xl font-black tabular-nums text-gray-900 [overflow-wrap:anywhere] dark:text-white xl:text-2xl 2xl:text-3xl"
-              :data-testid="`traffic-${side.key}-${metric.key}`"
-            >{{ formatTrafficBytes(side.summary?.[metric.bytes]) }}</span>
-            <span
-              v-if="metric.key === 'actual'"
-              class="whitespace-nowrap text-xs font-bold text-gray-400"
-              :aria-label="`${t('admin.ops.traffic.compression')} ${compressionLabel(side.summary)}`"
-              :data-testid="`traffic-${side.key}-compression`"
-            >{{ compressionLabel(side.summary) }}</span>
             <HelpTooltip
               v-if="!loading"
-              class="!ml-0"
+              class="!ml-0 min-w-0"
               width-class="w-72 max-w-[calc(100vw-2rem)]"
               :aria-label="t('admin.ops.traffic.breakdownHelp')"
               :data-testid="`traffic-${side.key}-${metric.key}-breakdown-tooltip`"
             >
+              <template #trigger>
+                <span
+                  class="min-w-0 cursor-help text-xl font-black tabular-nums text-gray-900 [overflow-wrap:anywhere] dark:text-white xl:text-2xl 2xl:text-3xl"
+                  :data-testid="`traffic-${side.key}-${metric.key}`"
+                >{{ formatTrafficBytes(side.summary?.[metric.bytes]) }}</span>
+              </template>
               <div class="space-y-3">
                 <div v-for="direction in directions" :key="direction">
                   <div class="flex items-baseline justify-between gap-4">
@@ -196,6 +192,12 @@ function compressionLabel(summary: OpsTrafficLink | undefined): string {
                 </div>
               </div>
             </HelpTooltip>
+            <span
+              v-if="metric.key === 'actual'"
+              class="whitespace-nowrap text-xs font-bold text-gray-400"
+              :aria-label="`${t('admin.ops.traffic.compression')} ${compressionLabel(side.summary)}`"
+              :data-testid="`traffic-${side.key}-compression`"
+            >{{ compressionLabel(side.summary) }}</span>
           </div>
         </dd>
       </div>

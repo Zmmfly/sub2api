@@ -22,7 +22,7 @@
           :data-testid="`traffic-${row.key}-${measurement.key}-direction`"
         >
           <Icon
-            :name="measurement.key === 'request' ? 'arrowDown' : 'arrowUp'"
+            :name="measurement.key === 'request' ? 'arrowUp' : 'arrowDown'"
             size="sm"
             class="h-3.5 w-3.5"
             :class="measurement.key === 'request' ? 'text-emerald-500' : 'text-violet-500'"

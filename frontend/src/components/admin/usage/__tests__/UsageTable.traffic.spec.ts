@@ -1,6 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import type { AdminUsageLog } from '@/types'
+import Icon from '@/components/icons/Icon.vue'
 import UsageTable from '../UsageTable.vue'
 
 vi.mock('vue-i18n', async (importOriginal) => ({
@@ -40,6 +41,24 @@ function mountTable(showUpstreamEndpoint?: boolean) {
     global: { stubs: { Teleport: true } },
   })
 }
+
+describe('UsageTable direction icons', () => {
+  it('shows input/request and output/response arrows without exchanging their values', () => {
+    const wrapper = mount(UsageTable, {
+      props: {
+        data: [{ ...row, input_tokens: 123, output_tokens: 456 }],
+        columns: [{ key: 'tokens', label: 'Tokens', sortable: false }],
+      },
+      global: { stubs: { Teleport: true } },
+    })
+    const directions = wrapper.get('td').findAllComponents(Icon)
+      .filter(component => ['arrowUp', 'arrowDown'].includes(component.props('name')))
+    expect(directions).toHaveLength(2)
+    expect(directions.map(component => component.props('name'))).toEqual(['arrowUp', 'arrowDown'])
+    expect(directions.map(component => component.element.parentElement?.textContent?.trim())).toEqual(['123', '456'])
+    wrapper.unmount()
+  })
+})
 
 describe('UsageTable traffic column', () => {
   it('renders the traffic slot in the actual DataTable with admin upstream and downstream rows', () => {

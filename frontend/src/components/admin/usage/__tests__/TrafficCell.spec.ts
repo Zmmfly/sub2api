@@ -2,6 +2,7 @@ import { enableAutoUnmount, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import type { TrafficMeasurement, UsageTraffic } from '@/types'
+import Icon from '@/components/icons/Icon.vue'
 import TrafficCell from '../TrafficCell.vue'
 
 vi.mock('vue-i18n', () => ({
@@ -59,12 +60,14 @@ describe('TrafficCell', () => {
     const requestDirection = request.get('[data-testid="traffic-upstream-request-direction"]')
     expect(requestDirection.attributes('aria-label')).toBe('Request')
     expect(requestDirection.attributes('title')).toBe('Request')
+    expect(requestDirection.getComponent(Icon).props('name')).toBe('arrowUp')
     expect(request.get('[data-testid="traffic-compression"]').text()).toBe('50.0%')
     expect(request.text()).not.toContain('Original 4 KiB')
     expect(request.text()).not.toContain('Compression rate')
 
     const response = wrapper.get('[data-testid="traffic-upstream-response"]')
     expect(response.get('[data-testid="traffic-upstream-response-direction"]').attributes('aria-label')).toBe('Response')
+    expect(response.get('[data-testid="traffic-upstream-response-direction"]').getComponent(Icon).props('name')).toBe('arrowDown')
     expect(response.get('[data-testid="traffic-compression"]').text()).toBe('-50.0%')
     expect(response.text()).not.toContain('Original 1 KiB')
 
@@ -91,8 +94,10 @@ describe('TrafficCell', () => {
     expect(rows[1].getAttribute('data-testid')).toBe('traffic-client-download')
     expect(wrapper.get('[data-testid="traffic-client-upload"] > span').text()).toBe('Client upload')
     expect(wrapper.get('[data-testid="traffic-client-upload"] [data-testid="traffic-actual"]').text()).toBe('123 B')
+    expect(wrapper.get('[data-testid="traffic-client-upload-request-direction"]').getComponent(Icon).props('name')).toBe('arrowUp')
     expect(wrapper.get('[data-testid="traffic-client-download"] > span').text()).toBe('Client download')
     expect(wrapper.get('[data-testid="traffic-client-download"] [data-testid="traffic-actual"]').text()).toBe('4 KiB')
+    expect(wrapper.get('[data-testid="traffic-client-download-response-direction"]').getComponent(Icon).props('name')).toBe('arrowDown')
     expect(wrapper.get('[data-testid="traffic-client-download"]').get('[data-testid="traffic-compression"]').text()).toBe('50.0%')
     expect(wrapper.get('[data-testid="traffic-client-download"]').text()).not.toContain('Original 8 KiB')
     expect(wrapper.html()).not.toMatch(/upstream|Upstream|2 KiB|1\.5 KiB|-50\.0%/)

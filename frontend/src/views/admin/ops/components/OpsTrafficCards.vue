@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import type { OpsTrafficLink, OpsTrafficSummary } from '@/api/admin/ops'
 import { formatTrafficBytes } from '@/utils/traffic'
 
@@ -12,8 +13,8 @@ const props = withDefaults(defineProps<{
 const { t } = useI18n()
 
 const sides = computed(() => [
-  { key: 'upstream', summary: props.traffic?.upstream },
-  { key: 'downstream', summary: props.traffic?.downstream }
+  { key: 'upstream', summary: props.traffic?.upstream, order: 8 },
+  { key: 'downstream', summary: props.traffic?.downstream, order: 9 }
 ] as const)
 
 const measurements = [
@@ -74,88 +75,122 @@ function compressionLabel(summary: OpsTrafficLink | undefined): string {
 </script>
 
 <template>
-  <section
-    class="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-3"
-    data-testid="traffic-cards"
-    :aria-label="t('admin.ops.traffic.title')"
+  <span v-if="loading" class="sr-only" role="status">{{ t('admin.ops.loadingText') }}</span>
+
+  <article
+    v-for="side in sides"
+    :key="side.key"
+    class="min-h-[184px] min-w-0 rounded-2xl bg-gray-50 p-4 dark:bg-dark-900 2xl:min-h-44"
+    :style="{ order: side.order }"
+    :data-testid="`traffic-${side.key}-card`"
+    :aria-label="t(`admin.ops.traffic.${side.key}`)"
     :aria-busy="loading"
   >
-    <span v-if="loading" class="sr-only" role="status">{{ t('admin.ops.loadingText') }}</span>
-
-    <div
-      v-if="!loading && (ingestionFailed > 0 || ingestionPending > 0)"
-      class="min-w-0 rounded-xl border p-3 text-xs md:col-span-3"
-      :class="ingestionFailed > 0 ? 'border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300' : 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300'"
-      :role="ingestionFailed > 0 ? 'alert' : 'status'"
-      data-testid="traffic-ingestion-warning"
-    >
-      <p v-if="ingestionFailed > 0" class="font-semibold" data-testid="traffic-ingestion-failed">{{ t('admin.ops.traffic.ingestionFailed', { count: ingestionFailed }) }}</p>
-      <p v-if="ingestionPending > 0" class="font-semibold" data-testid="traffic-ingestion-pending">{{ t('admin.ops.traffic.ingestionPending', { count: ingestionPending }) }}</p>
-      <p class="mt-1" data-testid="traffic-ingestion-scope">{{ t('admin.ops.traffic.ingestionScope') }}</p>
-      <p class="mt-1" data-testid="traffic-ingestion-coverage">{{ t('admin.ops.traffic.ingestionCoverage') }}</p>
+    <div class="flex items-center justify-between gap-2">
+      <div class="flex min-w-0 items-center gap-1">
+        <h2 class="text-[10px] font-bold uppercase text-gray-400">{{ t(`admin.ops.traffic.${side.key}`) }}</h2>
+        <HelpTooltip
+          v-if="!loading"
+          width-class="w-72 max-w-[calc(100vw-2rem)]"
+          :aria-label="t('admin.ops.traffic.coverageHelp')"
+          :data-testid="`traffic-${side.key}-coverage-tooltip`"
+        >
+          <div class="space-y-2">
+            <p :data-testid="`traffic-${side.key}-original-coverage`"><span class="font-semibold">{{ t('admin.ops.traffic.original') }}:</span> {{ coverageText(side.summary?.original_sample_count) }}</p>
+            <p :data-testid="`traffic-${side.key}-actual-coverage`"><span class="font-semibold">{{ t('admin.ops.traffic.actual') }}:</span> {{ coverageText(side.summary?.actual_sample_count) }}</p>
+          </div>
+        </HelpTooltip>
+      </div>
+      <span
+        v-if="!loading && coverageState(side.summary)"
+        class="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 dark:bg-amber-950/40 dark:text-amber-400"
+        :data-testid="`traffic-${side.key}-coverage-state`"
+      >{{ t(`admin.ops.traffic.${coverageState(side.summary)}`) }}</span>
     </div>
 
-    <article
-      v-for="side in sides"
-      :key="side.key"
-      class="min-w-0 rounded-2xl bg-gray-50 p-4 dark:bg-dark-900"
-      :data-testid="`traffic-${side.key}-card`"
-    >
-      <div class="flex flex-wrap items-center justify-between gap-2">
-        <h2 class="text-xs font-bold text-gray-500 dark:text-gray-400">{{ t(`admin.ops.traffic.${side.key}`) }}</h2>
-        <span
-          v-if="!loading && coverageState(side.summary)"
-          class="text-[10px] text-amber-700 dark:text-amber-400"
-          :data-testid="`traffic-${side.key}-coverage-state`"
-        >{{ t(`admin.ops.traffic.${coverageState(side.summary)}`) }}</span>
+    <dl class="mt-2 space-y-2">
+      <div v-for="metric in measurements" :key="metric.key">
+        <dt class="text-xs text-gray-500 dark:text-gray-400">{{ t(`admin.ops.traffic.${metric.key}`) }}</dt>
+        <dd class="mt-1">
+          <div v-if="loading" class="h-9 w-28 animate-pulse rounded bg-gray-200 dark:bg-dark-700" aria-hidden="true"></div>
+          <div
+            v-else
+            class="min-w-0 text-3xl font-black tabular-nums text-gray-900 [overflow-wrap:anywhere] dark:text-white"
+            :data-testid="`traffic-${side.key}-${metric.key}`"
+          >{{ formatTrafficBytes(side.summary?.[metric.bytes]) }}</div>
+        </dd>
+      </div>
+    </dl>
+  </article>
+
+  <article
+    class="min-h-[184px] min-w-0 rounded-2xl bg-gray-50 p-4 dark:bg-dark-900 2xl:min-h-44"
+    style="order: 10;"
+    data-testid="traffic-composition-card"
+    :aria-label="t('admin.ops.traffic.compression')"
+    :aria-busy="loading"
+  >
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div class="flex min-w-0 items-center gap-1">
+        <h2 class="text-[10px] font-bold uppercase text-gray-400">{{ t('admin.ops.traffic.compression') }}</h2>
+        <HelpTooltip
+          width-class="w-80 max-w-[calc(100vw-2rem)]"
+          :aria-label="t('admin.ops.traffic.compositionHelp')"
+          data-testid="traffic-composition-tooltip"
+        >
+          <div class="space-y-2">
+            <template v-if="!loading">
+              <p
+                v-for="side in sides"
+                :key="side.key"
+                :data-testid="`traffic-${side.key}-paired-coverage`"
+              ><span class="font-semibold">{{ t(`admin.ops.traffic.${side.key}`) }}:</span> {{ coverageText(side.summary?.paired_sample_count, true) }}</p>
+            </template>
+            <p data-testid="traffic-compression-hint">{{ t('admin.ops.traffic.compressionHint') }}</p>
+            <p data-testid="traffic-scope">{{ t('admin.ops.traffic.scope') }}</p>
+          </div>
+        </HelpTooltip>
       </div>
 
-      <dl class="mt-3 space-y-3">
-        <div v-for="metric in measurements" :key="metric.key">
-          <dt class="text-xs text-gray-500 dark:text-gray-400">{{ t(`admin.ops.traffic.${metric.key}`) }}</dt>
-          <dd class="mt-1">
-            <div v-if="loading" class="h-7 w-28 animate-pulse rounded bg-gray-200 dark:bg-dark-700" aria-hidden="true"></div>
-            <div
-              v-else
-              class="min-w-0 text-2xl font-black tabular-nums text-gray-900 [overflow-wrap:anywhere] dark:text-white"
-              :data-testid="`traffic-${side.key}-${metric.key}`"
-            >{{ formatTrafficBytes(side.summary?.[metric.bytes]) }}</div>
-            <div v-if="loading" class="mt-1 h-3 w-32 animate-pulse rounded bg-gray-200 dark:bg-dark-700" aria-hidden="true"></div>
-            <div
-              v-else
-              class="mt-1 text-[10px] text-gray-500 dark:text-gray-400"
-              :data-testid="`traffic-${side.key}-${metric.key}-coverage`"
-            >{{ coverageText(side.summary?.[metric.count]) }}</div>
-          </dd>
+      <HelpTooltip
+        v-if="!loading && (ingestionFailed > 0 || ingestionPending > 0)"
+        width-class="w-80 max-w-[calc(100vw-2rem)]"
+        class="ml-0 max-w-full rounded-full px-2 py-0.5 text-[10px]"
+        :class="ingestionFailed > 0 ? 'bg-red-50 text-red-800 dark:bg-red-950/40 dark:text-red-300' : 'bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300'"
+        :role="ingestionFailed > 0 ? 'alert' : 'status'"
+        :aria-label="t('admin.ops.traffic.ingestionHelp')"
+        data-testid="traffic-ingestion-warning"
+      >
+        <template #trigger>
+          <span class="inline-flex max-w-full flex-wrap items-center gap-1 font-semibold">
+            <svg class="h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3m0 4h.01M10.29 3.86l-8.2 14.2A2 2 0 0 0 3.82 21h16.36a2 2 0 0 0 1.73-2.94l-8.2-14.2a2 2 0 0 0-3.42 0z" />
+            </svg>
+            <span v-if="ingestionFailed > 0" data-testid="traffic-ingestion-failed-short">{{ t('admin.ops.traffic.ingestionFailedShort', { count: ingestionFailed }) }}</span>
+            <span v-if="ingestionPending > 0" data-testid="traffic-ingestion-pending-short">{{ t('admin.ops.traffic.ingestionPendingShort', { count: ingestionPending }) }}</span>
+          </span>
+        </template>
+        <div class="space-y-2">
+          <p v-if="ingestionFailed > 0" data-testid="traffic-ingestion-failed">{{ t('admin.ops.traffic.ingestionFailed', { count: ingestionFailed }) }}</p>
+          <p v-if="ingestionPending > 0" data-testid="traffic-ingestion-pending">{{ t('admin.ops.traffic.ingestionPending', { count: ingestionPending }) }}</p>
+          <p data-testid="traffic-ingestion-scope">{{ t('admin.ops.traffic.ingestionScope') }}</p>
+          <p data-testid="traffic-ingestion-coverage">{{ t('admin.ops.traffic.ingestionCoverage') }}</p>
         </div>
-      </dl>
-    </article>
+      </HelpTooltip>
+    </div>
 
-    <article class="min-w-0 rounded-2xl bg-gray-50 p-4 dark:bg-dark-900" data-testid="traffic-composition-card">
-      <h2 class="text-xs font-bold text-gray-500 dark:text-gray-400">{{ t('admin.ops.traffic.composition') }}</h2>
-      <p class="mt-1 text-[10px] text-gray-500 dark:text-gray-400">{{ t('admin.ops.traffic.compression') }}</p>
-      <dl class="mt-3 space-y-3">
-        <div v-for="side in sides" :key="side.key">
-          <dt class="text-xs text-gray-500 dark:text-gray-400">{{ t(`admin.ops.traffic.${side.key}`) }}</dt>
-          <dd class="mt-1">
-            <div v-if="loading" class="h-7 w-24 animate-pulse rounded bg-gray-200 dark:bg-dark-700" aria-hidden="true"></div>
-            <div
-              v-else
-              class="min-w-0 text-2xl font-black tabular-nums text-gray-900 [overflow-wrap:anywhere] dark:text-white"
-              :data-testid="`traffic-${side.key}-compression`"
-            >{{ compressionLabel(side.summary) }}</div>
-            <div v-if="loading" class="mt-1 h-3 w-32 animate-pulse rounded bg-gray-200 dark:bg-dark-700" aria-hidden="true"></div>
-            <div
-              v-else
-              class="mt-1 text-[10px] text-gray-500 dark:text-gray-400"
-              :data-testid="`traffic-${side.key}-paired-coverage`"
-            >{{ coverageText(side.summary?.paired_sample_count, true) }}</div>
-          </dd>
-        </div>
-      </dl>
-      <p class="mt-3 text-[10px] leading-relaxed text-gray-500 dark:text-gray-400" data-testid="traffic-compression-hint">{{ t('admin.ops.traffic.compressionHint') }}</p>
-    </article>
-
-    <p class="text-[10px] leading-relaxed text-gray-500 dark:text-gray-400 md:col-span-3" data-testid="traffic-scope">{{ t('admin.ops.traffic.scope') }}</p>
-  </section>
+    <dl class="mt-2 space-y-2">
+      <div v-for="side in sides" :key="side.key">
+        <dt class="text-xs text-gray-500 dark:text-gray-400">{{ t(`admin.ops.traffic.${side.key}`) }}</dt>
+        <dd class="mt-1">
+          <div v-if="loading" class="h-9 w-24 animate-pulse rounded bg-gray-200 dark:bg-dark-700" aria-hidden="true"></div>
+          <div
+            v-else
+            class="min-w-0 text-3xl font-black tabular-nums text-gray-900 [overflow-wrap:anywhere] dark:text-white"
+            :data-testid="`traffic-${side.key}-compression`"
+          >{{ compressionLabel(side.summary) }}</div>
+        </dd>
+      </div>
+    </dl>
+  </article>
 </template>

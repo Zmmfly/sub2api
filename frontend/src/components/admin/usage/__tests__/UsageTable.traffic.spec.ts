@@ -24,6 +24,12 @@ const row = {
   },
 } as AdminUsageLog
 
+function textWithoutTooltips(element: Element): string {
+  const clone = element.cloneNode(true) as HTMLElement
+  clone.querySelectorAll('[role="tooltip"]').forEach(tooltip => tooltip.remove())
+  return clone.textContent ?? ''
+}
+
 function mountTable(showUpstreamEndpoint?: boolean) {
   return mount(UsageTable, {
     props: {
@@ -39,7 +45,13 @@ describe('UsageTable traffic column', () => {
   it('renders the traffic slot in the actual DataTable with admin upstream and downstream rows', () => {
     const wrapper = mountTable()
     expect(wrapper.get('th').text()).toBe('Traffic')
-    expect(wrapper.get('td [data-testid="traffic-upstream"]').text()).toContain('555 B')
+    const upstream = wrapper.get('td [data-testid="traffic-upstream"]')
+    expect(upstream.text()).toContain('555 B')
+    expect(upstream.findAll('[data-testid="traffic-compression"]').map(cell => cell.text())).toEqual(['28.6%', '25.0%'])
+    expect(textWithoutTooltips(upstream.element)).not.toContain('777 B')
+    expect(textWithoutTooltips(upstream.element)).not.toContain('888 B')
+    expect(upstream.get('[data-testid="traffic-upstream-request-direction"]').attributes('aria-label')).toBe('usage.traffic.request')
+    expect(upstream.get('[data-testid="traffic-upstream-response-direction"]').attributes('aria-label')).toBe('usage.traffic.response')
     expect(wrapper.get('td [data-testid="traffic-downstream"]').text()).toContain('10 B')
     expect(wrapper.findAll('[data-testid="traffic-actual"]')).toHaveLength(4)
     wrapper.unmount()
@@ -51,6 +63,8 @@ describe('UsageTable traffic column', () => {
     expect(wrapper.find('[data-testid="traffic-upstream"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="traffic-client-upload"]').text()).toContain('10 B')
     expect(wrapper.get('[data-testid="traffic-client-download"]').text()).toContain('20 B')
+    expect(wrapper.get('[data-testid="traffic-client-upload-request-direction"]').attributes('aria-label')).toBe('usage.traffic.request')
+    expect(wrapper.get('[data-testid="traffic-client-download-response-direction"]').attributes('aria-label')).toBe('usage.traffic.response')
     expect(wrapper.html()).not.toMatch(/555 B|666 B|777 B|888 B|usage\.traffic\.upstream/)
     wrapper.unmount()
   })

@@ -1207,7 +1207,7 @@ function handleToolbarRefresh() {
         </div>
       </div>
 
-      <!-- Right: 6 cards (3 cols x 2 rows) -->
+      <!-- Right: overview cards, including HTTP body traffic after output TPS. -->
       <div class="grid h-full grid-cols-1 content-center gap-4 sm:grid-cols-2 lg:col-span-7 lg:grid-cols-3">
         <!-- Card 1: Requests -->
         <div class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-900" style="order: 1;">
@@ -1431,7 +1431,7 @@ function handleToolbarRefresh() {
         </div>
 
         <!-- Per-request output speed, separate from system throughput. -->
-        <div class="rounded-2xl bg-gray-50 p-4 dark:bg-dark-900" data-testid="output-tps-card" style="order: 7;">
+        <div class="min-h-[184px] rounded-2xl bg-gray-50 p-4 dark:bg-dark-900 2xl:min-h-44" data-testid="output-tps-card" style="order: 7;">
           <div class="flex items-center gap-1">
             <span class="text-[10px] font-bold uppercase text-gray-400">{{ t('admin.ops.outputTps') }}</span>
             <HelpTooltip v-if="!props.fullscreen" :content="t('admin.ops.tooltips.outputTps')" />
@@ -1451,11 +1451,11 @@ function handleToolbarRefresh() {
             {{ t('admin.ops.outputTpsSamples', { count: overview.output_tps == null ? '—' : formatNumber(overview.output_tps.sample_count) }) }}
           </div>
         </div>
+
+        <!-- Entity-body traffic shares the overview's time/platform/group/query-mode filters. -->
+        <OpsTrafficCards :traffic="overview.traffic" :loading="props.loading" />
       </div>
     </div>
-
-    <!-- Entity-body traffic shares the overview's time/platform/group/query-mode filters. -->
-    <OpsTrafficCards v-if="overview" :traffic="overview.traffic" :loading="props.loading" />
 
     <!-- Integrated: System health (cards) -->
     <div v-if="overview" class="mt-2 border-t border-gray-100 pt-4 dark:border-dark-700">

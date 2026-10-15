@@ -1,5 +1,6 @@
-import { mount } from '@vue/test-utils'
-import { describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, mount } from '@vue/test-utils'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { nextTick } from 'vue'
 import type { TrafficMeasurement, UsageTraffic } from '@/types'
 import TrafficCell from '../TrafficCell.vue'
 
@@ -19,6 +20,11 @@ vi.mock('vue-i18n', () => ({
   }),
 }))
 
+enableAutoUnmount(afterEach)
+afterEach(() => {
+  document.body.innerHTML = ''
+})
+
 const measured = (original: number | null, actual: number | null, compressed = false): TrafficMeasurement => ({
   original_bytes: original,
   actual_bytes: actual,
@@ -37,7 +43,7 @@ const traffic: UsageTraffic = {
 }
 
 describe('TrafficCell', () => {
-  it('renders two admin rows with request and response actual bytes and inline compression details', () => {
+  it('renders compact admin measurements with labeled direction icons and original bytes in hover tooltips', async () => {
     const wrapper = mount(TrafficCell, { props: { traffic, showUpstream: true } })
     const rows = wrapper.get('[data-testid="traffic-cell"]').element.children
     expect(rows).toHaveLength(2)
@@ -46,15 +52,34 @@ describe('TrafficCell', () => {
     const upstream = wrapper.get('[data-testid="traffic-upstream"]')
     expect(upstream.findAll('[data-testid="traffic-actual"]').map(cell => cell.text())).toEqual(['2 KiB', '1.5 KiB'])
     expect(upstream.text()).toContain('Upstream')
-    expect(upstream.text()).toContain('Request')
-    expect(upstream.text()).toContain('Response')
+    expect(upstream.text()).not.toContain('Request')
+    expect(upstream.text()).not.toContain('Response')
+
     const request = wrapper.get('[data-testid="traffic-upstream-request"]')
-    expect(request.text()).toContain('Original 4 KiB; Compression rate 50.0%')
+    const requestDirection = request.get('[data-testid="traffic-upstream-request-direction"]')
+    expect(requestDirection.attributes('aria-label')).toBe('Request')
+    expect(requestDirection.attributes('title')).toBe('Request')
+    expect(request.get('[data-testid="traffic-compression"]').text()).toBe('50.0%')
+    expect(request.text()).not.toContain('Original 4 KiB')
+    expect(request.text()).not.toContain('Compression rate')
+
     const response = wrapper.get('[data-testid="traffic-upstream-response"]')
-    expect(response.text()).toContain('Original 1 KiB; Compression rate -50.0%')
+    expect(response.get('[data-testid="traffic-upstream-response-direction"]').attributes('aria-label')).toBe('Response')
+    expect(response.get('[data-testid="traffic-compression"]').text()).toBe('-50.0%')
+    expect(response.text()).not.toContain('Original 1 KiB')
+
+    const originalTrigger = request.get('[data-testid="traffic-original-tooltip"]')
+    expect(request.get('[data-testid="traffic-original-icon"]').attributes('aria-label')).toBe('Original')
+    await originalTrigger.trigger('mouseenter')
+    await nextTick()
+    const visibleTooltip = Array.from(document.body.querySelectorAll<HTMLElement>('[role="tooltip"]')).find(tooltip => tooltip.style.display !== 'none')
+    expect(visibleTooltip?.textContent).toBe('Original 4 KiB')
+    await originalTrigger.trigger('mouseleave')
+    await nextTick()
+
     expect(wrapper.get('[data-testid="traffic-downstream"]').findAll('[data-testid="traffic-actual"]').map(cell => cell.text())).toEqual(['123 B', '4 KiB'])
     expect(wrapper.get('[data-testid="traffic-downstream-request"]').find('[data-testid="traffic-compression"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="traffic-downstream-response"]').text()).toContain('Original 8 KiB; Compression rate 50.0%')
+    expect(wrapper.get('[data-testid="traffic-downstream-response"]').get('[data-testid="traffic-compression"]').text()).toBe('50.0%')
     expect(wrapper.get('[data-testid="traffic-cell"]').attributes('title')).toContain('excluding HTTP headers and TCP/TLS overhead')
   })
 
@@ -68,7 +93,8 @@ describe('TrafficCell', () => {
     expect(wrapper.get('[data-testid="traffic-client-upload"] [data-testid="traffic-actual"]').text()).toBe('123 B')
     expect(wrapper.get('[data-testid="traffic-client-download"] > span').text()).toBe('Client download')
     expect(wrapper.get('[data-testid="traffic-client-download"] [data-testid="traffic-actual"]').text()).toBe('4 KiB')
-    expect(wrapper.get('[data-testid="traffic-client-download"]').text()).toContain('Original 8 KiB; Compression rate 50.0%')
+    expect(wrapper.get('[data-testid="traffic-client-download"]').get('[data-testid="traffic-compression"]').text()).toBe('50.0%')
+    expect(wrapper.get('[data-testid="traffic-client-download"]').text()).not.toContain('Original 8 KiB')
     expect(wrapper.html()).not.toMatch(/upstream|Upstream|2 KiB|1\.5 KiB|-50\.0%/)
     expect(wrapper.findAll('[data-testid="traffic-actual"]')).toHaveLength(2)
   })
@@ -107,15 +133,15 @@ describe('TrafficCell', () => {
     [measured(100, 50, false), '50 B', null],
     [measured(100, 100, false), '100 B', null],
     [measured(100, 150, false), '150 B', null],
-    [measured(100, 50, true), '50 B', 'Original 100 B; Compression rate 50.0%'],
-    [measured(100, 100, true), '100 B', 'Original 100 B; Compression rate 0.0%'],
-    [measured(100, 150, true), '150 B', 'Original 100 B; Compression rate -50.0%'],
-    [measured(100, 0, true), '0 B', 'Original 100 B; Compression rate 100.0%'],
-    [measured(0, 0, true), '0 B', 'Original 0 B; Compression rate —'],
-    [measured(0, 20, true), '20 B', 'Original 0 B; Compression rate —'],
-    [measured(null, 20, true), '20 B', 'Original —; Compression rate —'],
-    [measured(100, null, true), '—', 'Original 100 B; Compression rate —'],
-    [measured(null, null, true), '—', 'Original —; Compression rate —'],
+    [measured(100, 50, true), '50 B', '50.0%'],
+    [measured(100, 100, true), '100 B', '0.0%'],
+    [measured(100, 150, true), '150 B', '-50.0%'],
+    [measured(100, 0, true), '0 B', '100.0%'],
+    [measured(0, 0, true), '0 B', null],
+    [measured(0, 20, true), '20 B', null],
+    [measured(null, 20, true), '20 B', null],
+    [measured(100, null, true), '—', null],
+    [measured(null, null, true), '—', null],
     [measured(null, 0, false), '0 B', null],
   ] as const)('uses compressed flag, not size comparison, for %j', (measurement, actual, compression) => {
     const wrapper = mount(TrafficCell, { props: { traffic: { downstream: { request: measurement } } } })
@@ -123,6 +149,18 @@ describe('TrafficCell', () => {
     expect(cell.get('[data-testid="traffic-actual"]').text()).toBe(actual)
     const details = cell.find('[data-testid="traffic-compression"]')
     expect(details.exists()).toBe(compression !== null)
-    if (compression !== null) expect(details.text()).toBe(`(${compression})`)
+    if (compression !== null) expect(details.text()).toBe(compression)
+  })
+
+  it('shows actual bytes without inventing a rate or original value when a compressed original is unavailable', () => {
+    const wrapper = mount(TrafficCell, {
+      props: { traffic: { downstream: { response: measured(null, 2048, true) } } },
+    })
+    const measurement = wrapper.get('[data-testid="traffic-client-download-response"]')
+    expect(measurement.get('[data-testid="traffic-actual"]').text()).toBe('2 KiB')
+    expect(measurement.find('[data-testid="traffic-compression"]').exists()).toBe(false)
+    expect(measurement.find('[data-testid="traffic-original-tooltip"]').exists()).toBe(false)
+    expect(measurement.text()).not.toContain('0.0%')
+    expect(measurement.text()).not.toContain('Original')
   })
 })

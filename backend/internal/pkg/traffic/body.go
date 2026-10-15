@@ -2,6 +2,7 @@ package traffic
 
 import (
 	"io"
+	"net/http"
 	"strings"
 	"sync"
 )
@@ -23,13 +24,33 @@ func ObserveBody(body io.ReadCloser, counter *Counter, identity bool, expected i
 	return &observedBody{ReadCloser: body, counter: counter, identity: identity, expected: expected}
 }
 
+// ObserveResponseBody measures bytes actually consumed from an upstream body,
+// including a stream closed at its protocol terminal event before HTTP EOF.
+// Unlike an outgoing request reader (whose bytes may not reach the socket), a
+// successful response Read is already an observation. Preserve those bytes on
+// early Close/read failure without draining the body or guessing Content-Length.
+// For encoded responses only actual bytes become available this way: decoder
+// read-ahead means a partial decoded body cannot supply a trustworthy ratio.
+func ObserveResponseBody(body io.ReadCloser, counter *Counter, identity bool, expected int64) io.ReadCloser {
+	if counter == nil || body == nil {
+		return body
+	}
+	if expected == 0 && body != http.NoBody {
+		// Custom transports commonly leave ContentLength at its zero value.
+		// An unread nonempty body must not become an observed zero-byte body.
+		expected = -1
+	}
+	return &observedBody{ReadCloser: body, counter: counter, identity: identity, expected: expected, keepConsumed: true}
+}
+
 type observedBody struct {
 	io.ReadCloser
-	counter  *Counter
-	identity bool
-	expected int64
-	mu       sync.Mutex
-	read     int64
+	counter      *Counter
+	identity     bool
+	expected     int64
+	keepConsumed bool
+	mu           sync.Mutex
+	read         int64
 }
 
 func (b *observedBody) Read(p []byte) (int, error) {
@@ -41,10 +62,18 @@ func (b *observedBody) Read(p []byte) (int, error) {
 	if b.identity {
 		b.counter.AddOriginal(n)
 	}
-	if err != nil && err != io.EOF {
-		b.counter.FailActual()
+	if b.keepConsumed && n > 0 {
+		b.counter.CompleteActual()
 		if b.identity {
-			b.counter.FailOriginal()
+			b.counter.CompleteOriginal()
+		}
+	}
+	if err != nil && err != io.EOF {
+		if !b.keepConsumed {
+			b.counter.FailActual()
+			if b.identity {
+				b.counter.FailOriginal()
+			}
 		}
 	} else if err == io.EOF || (b.expected >= 0 && b.read == b.expected) {
 		b.counter.CompleteActual()

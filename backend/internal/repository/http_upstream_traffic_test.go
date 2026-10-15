@@ -182,12 +182,15 @@ func TestUpstreamTrafficUnknownAndPartial(t *testing.T) {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
 		resp, err := doUpstreamRequest(server.Client(), req)
 		require.NoError(t, err)
-		_, err = resp.Body.Read(make([]byte, 1))
+		n, err := resp.Body.Read(make([]byte, 1))
 		require.NoError(t, err)
+		require.Equal(t, 1, n)
 		require.NoError(t, resp.Body.Close())
 		measurement := collector.Snapshot().Upstream.Response
-		require.Nil(t, measurement.ActualBytes)
-		require.Nil(t, measurement.OriginalBytes)
+		require.NotNil(t, measurement.ActualBytes)
+		require.NotNil(t, measurement.OriginalBytes)
+		require.EqualValues(t, n, *measurement.ActualBytes)
+		require.EqualValues(t, n, *measurement.OriginalBytes)
 	})
 	t.Run("read before failed socket write", func(t *testing.T) {
 		collector := traffic.NewCollector()

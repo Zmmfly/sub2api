@@ -146,7 +146,7 @@ func (t *trafficUpstreamTransport) RoundTrip(request *http.Request) (*http.Respo
 		resp.Body = traffic.ObserveOriginal(resp.Body, counter)
 		return resp, nil
 	}
-	resp.Body = traffic.ObserveBody(resp.Body, counter, !responseCompressed, resp.ContentLength)
+	resp.Body = traffic.ObserveResponseBody(resp.Body, counter, !responseCompressed, resp.ContentLength)
 	if responseCompressed {
 		decompressResponseBodyLazy(resp, counter)
 	}

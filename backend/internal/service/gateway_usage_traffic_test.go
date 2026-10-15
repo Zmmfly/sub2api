@@ -5,6 +5,8 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,6 +22,45 @@ func completeUsageTrafficBody(c *traffic.Collector, direction traffic.Direction,
 	counter.AddActual(actual)
 	counter.CompleteOriginal()
 	counter.CompleteActual()
+}
+
+func TestWriteUsageTraffic_ConsumedResponseSurvivesFinalize(t *testing.T) {
+	for _, compressed := range []bool{false, true} {
+		for _, alreadyFinalized := range []bool{false, true} {
+			collector := traffic.NewCollector()
+			ctx := traffic.WithCollector(context.Background(), collector)
+			counter := collector.Begin(traffic.UpstreamResponse, compressed)
+			reader := strings.NewReader("received-prefix-unread-tail")
+			body := traffic.ObserveResponseBody(io.NopCloser(reader), counter, !compressed, -1)
+			repo := &openAIRecordUsageLogRepoStub{}
+			log := &UsageLog{RequestID: "sse-consumed-prefix"}
+			if !alreadyFinalized {
+				writeUsageLogBestEffort(ctx, repo, log, "test")
+				require.Zero(t, repo.calls)
+			}
+			consumed := len("received-prefix")
+			_, err := io.ReadFull(body, make([]byte, consumed))
+			require.NoError(t, err)
+			require.NoError(t, body.Close())
+			require.Equal(t, len("-unread-tail"), reader.Len(), "accounting must not drain for persistence")
+			collector.Finalize()
+			if alreadyFinalized {
+				writeUsageLogBestEffort(ctx, repo, log, "test")
+			}
+			require.Equal(t, 1, repo.calls)
+			measured := repo.lastLog.Traffic.Upstream.Response
+			require.NotNil(t, measured.ActualBytes)
+			require.EqualValues(t, consumed, *measured.ActualBytes)
+			require.Equal(t, compressed, measured.Compressed)
+			if compressed {
+				require.Nil(t, measured.OriginalBytes)
+				require.Nil(t, measured.Ratio())
+			} else {
+				require.NotNil(t, measured.OriginalBytes)
+				require.EqualValues(t, consumed, *measured.OriginalBytes)
+			}
+		}
+	}
 }
 
 func TestRecordUsageTraffic_BillingCompletesBeforeFinalize(t *testing.T) {

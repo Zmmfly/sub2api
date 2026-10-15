@@ -9,8 +9,11 @@ import (
 )
 
 // Measurement describes one direction before and after content coding. Counts
-// are complete observed bodies; an incomplete or unsupported representation is
-// unknown. Compressed describes content coding, not whether it saved bytes.
+// are observed entity bytes, not an estimate of the entire intended payload.
+// An upstream response retains bytes already read even if it ends before HTTP
+// EOF. Missing/unprovable dimensions stay unknown; a partial compressed body
+// cannot supply a paired original size. Compressed describes content coding,
+// not whether it saved bytes.
 type Measurement struct {
 	OriginalBytes *int64 `json:"original_bytes"`
 	ActualBytes   *int64 `json:"actual_bytes"`
@@ -47,7 +50,9 @@ const (
 )
 
 // Counter tracks a single body/attempt, not just the successful attempt. A
-// dimension remains unknown until completion is observed. Failure is sticky.
+// dimension remains unknown until its observation is reliable. Outgoing bytes
+// require write confirmation; received response bytes are reliable as consumed.
+// Explicit invalidation is sticky.
 type Counter struct {
 	mu                               sync.Mutex
 	original, actual                 int64

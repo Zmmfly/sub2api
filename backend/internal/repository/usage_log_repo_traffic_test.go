@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"encoding/json"
+	"io"
 	"regexp"
 	"strconv"
 	"strings"
@@ -30,6 +31,23 @@ func trafficTestUsage() *traffic.Usage {
 	}
 }
 
+func trafficConsumedResponseTestUsage(t *testing.T) *traffic.Usage {
+	t.Helper()
+	const prefix = "consumed-encoded-prefix"
+	collector := traffic.NewCollector()
+	counter := collector.Begin(traffic.UpstreamResponse, true)
+	body := traffic.ObserveResponseBody(io.NopCloser(strings.NewReader(prefix+"-unread-tail")), counter, false, -1)
+	_, err := io.ReadFull(body, make([]byte, len(prefix)))
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	collector.Finalize()
+	value := collector.Snapshot()
+	require.NotNil(t, value.Upstream.Response.ActualBytes)
+	require.EqualValues(t, len(prefix), *value.Upstream.Response.ActualBytes)
+	require.Nil(t, value.Upstream.Response.OriginalBytes)
+	return value
+}
+
 func trafficTestLog(observation *traffic.Usage) *service.UsageLog {
 	return &service.UsageLog{
 		UserID: 1, APIKeyID: 2, AccountID: 3, RequestID: "traffic-test", Model: "test-model",
@@ -49,6 +67,7 @@ func TestUsageTrafficPrepareAndSQLScanRoundTrip(t *testing.T) {
 	}{
 		{"historical-null", nil},
 		{"all-directions-zero-unknown-and-expansion", trafficTestUsage()},
+		{"consumed-upstream-response-prefix", trafficConsumedResponseTestUsage(t)},
 		{"missing-directions", &traffic.Usage{Downstream: &traffic.Link{}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

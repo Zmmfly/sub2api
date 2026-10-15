@@ -21,6 +21,7 @@ func TestUsageTrafficUserDTOCannotContainUpstream(t *testing.T) {
 		{"historical-null", nil},
 		{"empty-unknown", &traffic.Usage{}},
 		{"upstream-only", &traffic.Usage{Upstream: &traffic.Link{Request: &traffic.Measurement{ActualBytes: &bytes}}}},
+		{"consumed-upstream-response", &traffic.Usage{Upstream: &traffic.Link{Response: &traffic.Measurement{ActualBytes: &bytes, Compressed: true}}}},
 		{"unknown-downstream", &traffic.Usage{Upstream: &traffic.Link{Request: &traffic.Measurement{ActualBytes: &bytes}}, Downstream: &traffic.Link{}}},
 		{"measured-zero", &traffic.Usage{Upstream: &traffic.Link{Request: &traffic.Measurement{ActualBytes: &bytes}}, Downstream: &traffic.Link{Request: &traffic.Measurement{OriginalBytes: &zero, ActualBytes: &zero}}}},
 		{"partial-compressed", &traffic.Usage{Upstream: &traffic.Link{Request: &traffic.Measurement{ActualBytes: &bytes}}, Downstream: &traffic.Link{Response: &traffic.Measurement{ActualBytes: &bytes, Compressed: true}}}},

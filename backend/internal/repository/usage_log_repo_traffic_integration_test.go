@@ -32,12 +32,16 @@ func TestUsageTrafficPostgresRoundTrip(t *testing.T) {
 	require.False(t, defaultValue.Valid)
 
 	for _, path := range []string{"single", "batch", "best-effort", "ent"} {
-		for _, missing := range []bool{false, true} {
-			t.Run(path+map[bool]string{false: "/observed", true: "/unknown"}[missing], func(t *testing.T) {
-				var value *traffic.Usage
-				if !missing {
-					value = trafficTestUsage()
-				}
+		for _, observation := range []struct {
+			name  string
+			value *traffic.Usage
+		}{
+			{"observed", trafficTestUsage()},
+			{"unknown", nil},
+			{"consumed-response-prefix", trafficConsumedResponseTestUsage(t)},
+		} {
+			t.Run(path+"/"+observation.name, func(t *testing.T) {
+				value := observation.value
 				log := &service.UsageLog{UserID: user.ID, APIKeyID: key.ID, AccountID: account.ID, RequestID: uuid.NewString(), Model: "gpt-5", CreatedAt: time.Now().UTC(), Traffic: value}
 				switch path {
 				case "single":
@@ -68,7 +72,7 @@ func TestUsageTrafficPostgresRoundTrip(t *testing.T) {
 				require.Equal(t, value, entity.Traffic)
 				var isNull bool
 				require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT traffic IS NULL FROM usage_logs WHERE id=$1", log.ID).Scan(&isNull))
-				require.Equal(t, missing, isNull, "unknown must be SQL NULL, not empty JSON or synthetic zero")
+				require.Equal(t, value == nil, isNull, "unknown must be SQL NULL, not empty JSON or synthetic zero")
 			})
 		}
 	}

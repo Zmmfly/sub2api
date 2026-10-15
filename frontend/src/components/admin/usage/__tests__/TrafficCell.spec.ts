@@ -32,6 +32,10 @@ const measured = (original: number | null, actual: number | null, compressed = f
   compressed,
 })
 
+// Rendered markup comments may name internals; the user-mode guard covers data, labels
+// and attributes, not explanatory comments.
+const textWithoutComments = (html: string): string => html.replace(/<!--[\s\S]*?-->/g, '')
+
 const traffic: UsageTraffic = {
   upstream: {
     request: measured(4096, 2048, true),
@@ -86,6 +90,55 @@ describe('TrafficCell', () => {
     expect(wrapper.get('[data-testid="traffic-cell"]').attributes('title')).toContain('excluding HTTP headers and TCP/TLS overhead')
   })
 
+  it.each([true, false])('keeps the byte columns aligned as right-aligned cells in one shared grid (showUpstream=%s)', (showUpstream) => {
+    const wrapper = mount(TrafficCell, { props: { traffic, showUpstream } })
+    const cell = wrapper.get('[data-testid="traffic-cell"]')
+    const tracks = showUpstream ? 7 : 4
+
+    // One grid owns every track: the row and measurement wrappers only contribute cells
+    // through `display: contents`, so all lines share one set of column widths.
+    expect(cell.classes()).toContain('grid')
+    expect(cell.classes().find(name => name.startsWith('grid-cols-['))?.replace('grid-cols-[', '').replace(']', '').split('_'))
+      .toEqual(Array(tracks).fill('max-content'))
+    expect(cell.classes()).not.toContain('space-y-1')
+
+    const rows = Array.from(cell.element.children) as HTMLElement[]
+    expect(rows.map(row => row.className)).toEqual(['contents', 'contents'])
+    expect(rows.map(row => row.getAttribute('data-testid'))).toEqual(showUpstream
+      ? ['traffic-upstream', 'traffic-downstream']
+      : ['traffic-client-upload', 'traffic-client-download'])
+    expect(rows.map(row => row.children[0].textContent)).toEqual(showUpstream
+      ? ['Upstream', 'Downstream']
+      : ['Client upload', 'Client download'])
+
+    for (const row of rows) {
+      const measurements = Array.from(row.children).slice(1) as HTMLElement[]
+      expect(measurements.map(measurement => measurement.className)).toEqual(measurements.map(() => 'contents'))
+      // The label plus three tracks per measurement fills exactly one grid line; a shorter
+      // line would let later cells wrap and lose the column alignment.
+      expect(1 + measurements.length * 3).toBe(tracks)
+      for (const measurement of measurements) {
+        const [direction, bytes, rate] = Array.from(measurement.children) as HTMLElement[]
+        expect([direction, bytes, rate]).toHaveLength(3)
+        expect(direction.getAttribute('role')).toBe('img')
+        expect(bytes.dataset.testid).toBe('traffic-actual')
+        // Byte values right-align inside the shared track, which is what puts the
+        // upstream and downstream numbers into the same numeric column.
+        expect(bytes.className).toContain('justify-self-end')
+        // The rate keeps its own track so that a missing rate cannot shift the column.
+        expect(rate.className).toContain('inline-flex')
+      }
+    }
+
+    // The rate-less request measurement still occupies its (empty) rate track.
+    const rateLess = wrapper.get(showUpstream
+      ? '[data-testid="traffic-downstream-request"]'
+      : '[data-testid="traffic-client-upload-request"]')
+    expect(rateLess.element.children).toHaveLength(3)
+    expect(rateLess.get('[data-testid="traffic-actual"]').text()).toBe('123 B')
+    expect(rateLess.find('[data-testid="traffic-compression"]').exists()).toBe(false)
+  })
+
   it('defaults to two client rows and never renders unexpected upstream data, labels, or attributes', () => {
     const wrapper = mount(TrafficCell, { props: { traffic } })
     const rows = wrapper.get('[data-testid="traffic-cell"]').element.children
@@ -100,7 +153,7 @@ describe('TrafficCell', () => {
     expect(wrapper.get('[data-testid="traffic-client-download-response-direction"]').getComponent(Icon).props('name')).toBe('arrowDown')
     expect(wrapper.get('[data-testid="traffic-client-download"]').get('[data-testid="traffic-compression"]').text()).toBe('50.0%')
     expect(wrapper.get('[data-testid="traffic-client-download"]').text()).not.toContain('Original 8 KiB')
-    expect(wrapper.html()).not.toMatch(/upstream|Upstream|2 KiB|1\.5 KiB|-50\.0%/)
+    expect(textWithoutComments(wrapper.html())).not.toMatch(/upstream|Upstream|2 KiB|1\.5 KiB|-50\.0%/)
     expect(wrapper.findAll('[data-testid="traffic-actual"]')).toHaveLength(2)
   })
 

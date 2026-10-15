@@ -1,22 +1,38 @@
 <template>
-  <div data-testid="traffic-cell" class="space-y-1 text-xs" :title="t('usage.traffic.bodyOnlyHint')">
+  <!--
+    One shared grid holds the label and every measurement part of every line, so the
+    request and response byte values form right-aligned numeric columns that line up
+    vertically across the upstream/downstream lines. A line without a compression rate
+    leaves that track empty instead of shifting the response column. The row and
+    measurement wrappers stay grouped in the DOM (and keep their test ids) through
+    `display: contents`.
+  -->
+  <div
+    data-testid="traffic-cell"
+    class="grid items-center gap-x-1 gap-y-1 text-xs"
+    :class="showUpstream
+      ? 'grid-cols-[max-content_max-content_max-content_max-content_max-content_max-content_max-content]'
+      : 'grid-cols-[max-content_max-content_max-content_max-content]'"
+    :title="t('usage.traffic.bodyOnlyHint')"
+  >
     <div
       v-for="row in rows"
       :key="row.key"
       :data-testid="`traffic-${row.key}`"
-      class="flex flex-wrap items-center gap-x-3 gap-y-0.5"
+      class="contents"
     >
-      <span class="text-gray-500 dark:text-gray-400">{{ row.label }}</span>
-      <span
-        v-for="measurement in row.measurements"
+      <span class="pr-2 text-gray-500 dark:text-gray-400">{{ row.label }}</span>
+      <div
+        v-for="(measurement, index) in row.measurements"
         :key="measurement.key"
         :data-testid="`traffic-${row.key}-${measurement.key}`"
-        class="inline-flex items-center gap-1 whitespace-nowrap"
+        class="contents"
       >
         <span
           v-if="measurement.label"
           role="img"
           class="inline-flex items-center"
+          :class="index > 0 ? 'pl-2' : ''"
           :aria-label="measurement.label"
           :title="measurement.label"
           :data-testid="`traffic-${row.key}-${measurement.key}-direction`"
@@ -29,35 +45,37 @@
             aria-hidden="true"
           />
         </span>
-        <span data-testid="traffic-actual" class="whitespace-nowrap font-medium tabular-nums text-gray-900 dark:text-white">
+        <span data-testid="traffic-actual" class="justify-self-end whitespace-nowrap font-medium tabular-nums text-gray-900 dark:text-white">
           {{ formatTrafficBytes(measurement.value?.actual_bytes) }}
         </span>
-        <template v-if="compressionRate(measurement.value) !== null">
-          <span
-            data-testid="traffic-compression"
-            class="whitespace-nowrap tabular-nums text-gray-500 dark:text-gray-400"
-            :aria-label="`${t('usage.traffic.compressionRate')} ${compressionRate(measurement.value)}`"
-          >{{ compressionRate(measurement.value) }}</span>
-          <HelpTooltip
-            class="ml-0"
-            width-class="w-max max-w-[calc(100vw-2rem)]"
-            :content="`${t('usage.traffic.original')} ${formatTrafficBytes(measurement.value?.original_bytes)}`"
-            data-testid="traffic-original-tooltip"
-          >
-            <template #trigger>
-              <span
-                role="img"
-                class="inline-flex cursor-help items-center text-gray-400 transition-colors hover:text-primary-600 dark:text-gray-500 dark:hover:text-primary-400"
-                :aria-label="t('usage.traffic.original')"
-                :title="t('usage.traffic.original')"
-                data-testid="traffic-original-icon"
-              >
-                <Icon name="infoCircle" size="xs" aria-hidden="true" />
-              </span>
-            </template>
-          </HelpTooltip>
-        </template>
-      </span>
+        <span class="inline-flex items-center gap-1 whitespace-nowrap">
+          <template v-if="compressionRate(measurement.value) !== null">
+            <span
+              data-testid="traffic-compression"
+              class="whitespace-nowrap tabular-nums text-gray-500 dark:text-gray-400"
+              :aria-label="`${t('usage.traffic.compressionRate')} ${compressionRate(measurement.value)}`"
+            >{{ compressionRate(measurement.value) }}</span>
+            <HelpTooltip
+              class="ml-0"
+              width-class="w-max max-w-[calc(100vw-2rem)]"
+              :content="`${t('usage.traffic.original')} ${formatTrafficBytes(measurement.value?.original_bytes)}`"
+              data-testid="traffic-original-tooltip"
+            >
+              <template #trigger>
+                <span
+                  role="img"
+                  class="inline-flex cursor-help items-center text-gray-400 transition-colors hover:text-primary-600 dark:text-gray-500 dark:hover:text-primary-400"
+                  :aria-label="t('usage.traffic.original')"
+                  :title="t('usage.traffic.original')"
+                  data-testid="traffic-original-icon"
+                >
+                  <Icon name="infoCircle" size="xs" aria-hidden="true" />
+                </span>
+              </template>
+            </HelpTooltip>
+          </template>
+        </span>
+      </div>
     </div>
   </div>
 </template>

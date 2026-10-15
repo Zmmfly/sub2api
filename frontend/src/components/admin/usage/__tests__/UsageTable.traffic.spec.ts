@@ -64,6 +64,9 @@ describe('UsageTable traffic column', () => {
   it('renders the traffic slot in the actual DataTable with admin upstream and downstream rows', () => {
     const wrapper = mountTable()
     expect(wrapper.get('th').text()).toBe('Traffic')
+    // The admin cell aligns upstream and downstream request/response values in one grid.
+    expect(wrapper.get('td [data-testid="traffic-cell"]').classes())
+      .toContain('grid-cols-[max-content_max-content_max-content_max-content_max-content_max-content_max-content]')
     const upstream = wrapper.get('td [data-testid="traffic-upstream"]')
     expect(upstream.text()).toContain('555 B')
     expect(upstream.findAll('[data-testid="traffic-compression"]').map(cell => cell.text())).toEqual(['28.6%', '25.0%'])

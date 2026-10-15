@@ -15,7 +15,9 @@ Each body has `actual_bytes`, `original_bytes`, and `compressed`. Actual means t
 
 Compression savings are `(1 - actual_bytes / original_bytes) * 100%`. A negative result means encoding enlarged the body. The rate is unknown when the original size is zero or either value is unavailable. `compressed` records encoding, not whether the encoded body was smaller. This matters for small gzip bodies and retries combining encoded and identity responses.
 
-A missing observation is `null`, never an invented zero. A completely observed empty body can be zero. Historical usage rows are not backfilled. Incomplete reads, unknown encodings, transport failures, and paths without instrumentation can leave individual fields unknown. The gateway does not drain otherwise unread request bodies just to obtain a statistic.
+A missing observation is `null`, never an invented zero. A completely observed empty body can be zero. Historical usage rows are not backfilled. Unknown encodings, failed outgoing writes, unread bodies and paths without instrumentation can leave individual fields unknown. The gateway does not drain otherwise unread request or response bodies just to obtain a statistic.
+
+An upstream response retains the **bytes actually read**, even when an SSE terminal event (`[DONE]`, `response.completed`, etc.) causes the gateway to close it before HTTP EOF, or a later read fails. This is consumed traffic, not the advertised size of the entire intended response. For identity encoding, the same consumed prefix gives both original and actual bytes. For an encoded response, actual bytes remain available, but original bytes and the compression ratio stay unknown unless decoding completes: encoded/decoded read-ahead can otherwise compare different prefixes. Outgoing request readers still require the existing write-confirmation/error rules; reading a request buffer does not prove it was sent.
 
 ## Collection and finalization
 
@@ -52,11 +54,11 @@ Ledger ingestion uses one lazy worker, a 1,024-event queue, batches of up to 64 
 
 ## Dashboard and usage display
 
-The dashboard uses its existing time range, platform, group, refresh, and raw/auto/preaggregated query controls. Its three cards show upstream original/actual totals, downstream original/actual totals, and upstream/downstream compression savings. Request and response are combined on each side.
+The dashboard uses its existing time range, platform, group, refresh, and raw/auto/preaggregated query controls. Its three compact cards share the overview grid and output-TPS card sizing, and show upstream original/actual totals, downstream original/actual totals, and upstream/downstream compression savings. Request and response are combined on each side. Scope, formulas and detailed coverage are available from help icons rather than permanent explanatory paragraphs; missing coverage and ingestion problems retain compact visible indicators.
 
 Original and actual totals have independent sample coverage. The compression rate uses only the same paired sample population; it is not computed by dividing independently covered totals. Coverage is measured against two potential body observations per ledger request. The ledger request count is separate from the dashboard's usage/error-derived request count.
 
-The usage table column key is `traffic`. Administrators see upstream request/response on the first line and downstream request/response on the second. Users see client upload and client download. Encoding details and the original-byte compression rate appear only when that body's `compressed` flag is true. Missing data renders as `—`; measured zero renders as `0 B`. Units use binary multiples (`KiB`, `MiB`, `GiB`, etc.).
+The usage table column key is `traffic`. Administrators see upstream request/response on the first line and downstream request/response on the second. Users see client upload and client download. Labeled direction icons replace the request/response text; actual bytes and an available compression rate appear side by side. An information icon after the rate reveals original bytes on hover, rather than showing a long inline parenthesis. The rate appears only when that body's `compressed` flag is true and both byte counts permit calculation; an observed actual count with an unknown original remains visible without an invented rate. Missing data renders as `—`; measured zero renders as `0 B`. Units use binary multiples (`KiB`, `MiB`, `GiB`, etc.).
 
 ## Compatibility and deployment
 

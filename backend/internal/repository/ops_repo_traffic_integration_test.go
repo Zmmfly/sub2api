@@ -59,6 +59,22 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb)`, uuid.NewString(), "traffic-test", platf
 	require.EqualValues(t, 3, raw.Traffic.Upstream.PairedSampleCount)
 	require.InDelta(t, 56.25, *raw.Traffic.Upstream.CompressionPercent, 1e-9)
 	require.InDelta(t, -5, *raw.Traffic.Downstream.CompressionPercent, 1e-9)
+	require.Equal(t, &service.OpsTrafficDirection{
+		OriginalBytes: trafficInt64(1400), ActualBytes: trafficInt64(150),
+		OriginalSampleCount: 3, ActualSampleCount: 2,
+	}, raw.Traffic.Upstream.Request)
+	require.Equal(t, &service.OpsTrafficDirection{
+		OriginalBytes: trafficInt64(0), ActualBytes: trafficInt64(725),
+		OriginalSampleCount: 1, ActualSampleCount: 2,
+	}, raw.Traffic.Upstream.Response)
+	require.Equal(t, &service.OpsTrafficDirection{
+		OriginalBytes: trafficInt64(0), ActualBytes: trafficInt64(0),
+		OriginalSampleCount: 1, ActualSampleCount: 1,
+	}, raw.Traffic.Downstream.Request)
+	require.Equal(t, &service.OpsTrafficDirection{
+		OriginalBytes: trafficInt64(200), ActualBytes: trafficInt64(210),
+		OriginalSampleCount: 1, ActualSampleCount: 1,
+	}, raw.Traffic.Downstream.Response)
 
 	// Auto falls back when only traffic ledger data exists in missing buckets.
 	filter.QueryMode = service.OpsQueryModeAuto
@@ -99,6 +115,29 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb)`, uuid.NewString(), "traffic-test", platf
 			}
 		})
 	}
+
+	// Previously persisted hourly totals have no directional fields. Keep their
+	// valid totals and paired compression rate, but never present a split from
+	// only the new raw head/tail as if it covered the entire selected window.
+	_, err = integrationDB.ExecContext(ctx, `UPDATE ops_metrics_hourly SET traffic =
+traffic #- '{upstream,request}' #- '{upstream,response}' #- '{downstream,request}' #- '{downstream,response}'
+WHERE bucket_start = $1 AND group_id = $2`, start.Truncate(time.Hour).Add(time.Hour), groupID)
+	require.NoError(t, err)
+	legacyExpected := *raw.Traffic
+	legacyExpected.Upstream.Request, legacyExpected.Upstream.Response = nil, nil
+	legacyExpected.Downstream.Request, legacyExpected.Downstream.Response = nil, nil
+	for _, mode := range []service.OpsQueryMode{service.OpsQueryModePreagg, service.OpsQueryModeAuto} {
+		filter.QueryMode = mode
+		legacy, err := repo.GetDashboardOverview(ctx, filter)
+		require.NoError(t, err)
+		require.Equal(t, &legacyExpected, legacy.Traffic)
+	}
+	// The normal hourly refresh supplies the new split without a DDL migration.
+	require.NoError(t, repo.UpsertHourlyMetrics(ctx, start.Truncate(time.Hour), end.Add(time.Hour).Truncate(time.Hour)))
+	filter.QueryMode = service.OpsQueryModePreagg
+	refreshed, err := repo.GetDashboardOverview(ctx, filter)
+	require.NoError(t, err)
+	require.Equal(t, raw.Traffic, refreshed.Traffic)
 
 	// A historical preaggregation row without traffic is not a zero sample.
 	_, err = integrationDB.ExecContext(ctx, `UPDATE ops_metrics_hourly SET traffic = NULL WHERE bucket_start = $1 AND group_id = $2`, start.Truncate(time.Hour).Add(time.Hour), groupID)

@@ -17,19 +17,41 @@ type opsTrafficAggregate struct {
 	RequestCount int64                   `json:"request_count"`
 	Upstream     opsTrafficLinkAggregate `json:"upstream"`
 	Downstream   opsTrafficLinkAggregate `json:"downstream"`
+	// Sticky across merges: old nonempty buckets have side totals but no split.
+	// Keep their totals rather than scanning already-expired raw data, and do
+	// not expose a partial new-bucket split as if it covered the whole window.
+	directionalIncomplete bool
 }
 
 type opsTrafficLinkAggregate struct {
+	OriginalBytes       *int64                        `json:"original_bytes"`
+	ActualBytes         *int64                        `json:"actual_bytes"`
+	OriginalSampleCount int64                         `json:"original_sample_count"`
+	ActualSampleCount   int64                         `json:"actual_sample_count"`
+	PairedSampleCount   int64                         `json:"paired_sample_count"`
+	PairedOriginalBytes *int64                        `json:"paired_original_bytes"`
+	PairedActualBytes   *int64                        `json:"paired_actual_bytes"`
+	Request             *opsTrafficDirectionAggregate `json:"request"`
+	Response            *opsTrafficDirectionAggregate `json:"response"`
+}
+
+type opsTrafficDirectionAggregate struct {
 	OriginalBytes       *int64 `json:"original_bytes"`
 	ActualBytes         *int64 `json:"actual_bytes"`
 	OriginalSampleCount int64  `json:"original_sample_count"`
 	ActualSampleCount   int64  `json:"actual_sample_count"`
-	PairedSampleCount   int64  `json:"paired_sample_count"`
-	PairedOriginalBytes *int64 `json:"paired_original_bytes"`
-	PairedActualBytes   *int64 `json:"paired_actual_bytes"`
+}
+
+func (s opsTrafficAggregate) hasDirectionalBreakdown() bool {
+	return s.Upstream.Request != nil && s.Upstream.Response != nil &&
+		s.Downstream.Request != nil && s.Downstream.Response != nil
 }
 
 func (s *opsTrafficAggregate) add(other opsTrafficAggregate) {
+	if (s.RequestCount > 0 && !s.hasDirectionalBreakdown()) || other.directionalIncomplete ||
+		(other.RequestCount > 0 && !other.hasDirectionalBreakdown()) {
+		s.directionalIncomplete = true
+	}
 	s.RequestCount += other.RequestCount
 	s.Upstream.add(other.Upstream)
 	s.Downstream.add(other.Downstream)
@@ -43,6 +65,25 @@ func (s *opsTrafficLinkAggregate) add(other opsTrafficLinkAggregate) {
 	s.OriginalSampleCount += other.OriginalSampleCount
 	s.ActualSampleCount += other.ActualSampleCount
 	s.PairedSampleCount += other.PairedSampleCount
+	addTrafficDirection(&s.Request, other.Request)
+	addTrafficDirection(&s.Response, other.Response)
+}
+
+func addTrafficDirection(dst **opsTrafficDirectionAggregate, src *opsTrafficDirectionAggregate) {
+	if src == nil {
+		return
+	}
+	// Copy the nested aggregate as well as byte values: merging a shallow copy
+	// of an hourly aggregate must not mutate the original bucket's pointers.
+	var out opsTrafficDirectionAggregate
+	if *dst != nil {
+		out = **dst
+	}
+	addNullableTrafficBytes(&out.OriginalBytes, src.OriginalBytes)
+	addNullableTrafficBytes(&out.ActualBytes, src.ActualBytes)
+	out.OriginalSampleCount += src.OriginalSampleCount
+	out.ActualSampleCount += src.ActualSampleCount
+	*dst = &out
 }
 
 func addNullableTrafficBytes(dst **int64, src *int64) {
@@ -57,9 +98,25 @@ func addNullableTrafficBytes(dst **int64, src *int64) {
 }
 
 func (s opsTrafficAggregate) summary() *service.OpsTrafficSummary {
-	return &service.OpsTrafficSummary{
+	out := &service.OpsTrafficSummary{
 		Source: "http_requests", RequestCount: s.RequestCount,
 		Upstream: s.Upstream.summary(), Downstream: s.Downstream.summary(),
+	}
+	if s.directionalIncomplete || (s.RequestCount > 0 && !s.hasDirectionalBreakdown()) {
+		out.Upstream.Request, out.Upstream.Response = nil, nil
+		out.Downstream.Request, out.Downstream.Response = nil, nil
+	}
+	return out
+}
+
+func (s *opsTrafficDirectionAggregate) summary() *service.OpsTrafficDirection {
+	if s == nil {
+		// Empty windows have no observed bytes, not four synthetic zero sums.
+		return &service.OpsTrafficDirection{}
+	}
+	return &service.OpsTrafficDirection{
+		OriginalBytes: s.OriginalBytes, ActualBytes: s.ActualBytes,
+		OriginalSampleCount: s.OriginalSampleCount, ActualSampleCount: s.ActualSampleCount,
 	}
 }
 
@@ -68,6 +125,7 @@ func (s opsTrafficLinkAggregate) summary() service.OpsTrafficLink {
 		OriginalBytes: s.OriginalBytes, ActualBytes: s.ActualBytes,
 		OriginalSampleCount: s.OriginalSampleCount, ActualSampleCount: s.ActualSampleCount,
 		PairedSampleCount: s.PairedSampleCount,
+		Request:           s.Request.summary(), Response: s.Response.summary(),
 	}
 	if s.PairedSampleCount > 0 && s.PairedOriginalBytes != nil && *s.PairedOriginalBytes > 0 && s.PairedActualBytes != nil {
 		percent := (1 - float64(*s.PairedActualBytes)/float64(*s.PairedOriginalBytes)) * 100
@@ -90,6 +148,18 @@ func opsTrafficExtractSQL(alias string) string {
 		}
 	}
 	return strings.Join(fields, ",\n    ")
+}
+
+// Per-direction counts have one potential observation per ledger request. SUM
+// intentionally preserves NULL for an unobserved dimension, while COUNT(value)
+// includes measured zero and excludes missing values.
+func opsTrafficDirectionAggregateSQL(original, actual string) string {
+	return fmt.Sprintf(`jsonb_build_object(
+        'original_bytes', SUM(%s::numeric),
+        'actual_bytes', SUM(%s::numeric),
+        'original_sample_count', COUNT(%s),
+        'actual_sample_count', COUNT(%s)
+      )`, original, actual, original, actual)
 }
 
 // opsTrafficAggregateSQL is shared by raw and hourly queries. COALESCE is safe
@@ -120,10 +190,13 @@ func opsTrafficAggregateSQL() string {
       'actual_sample_count', %s,
       'paired_sample_count', COALESCE(SUM(%s::int + %s::int), 0),
       'paired_original_bytes', %s,
-      'paired_actual_bytes', %s
+      'paired_actual_bytes', %s,
+      'request', %s,
+      'response', %s
     )`, side, sumKnown(reqOriginal, respOriginal), sumKnown(reqActual, respActual),
 			countKnown(reqOriginal, respOriginal), countKnown(reqActual, respActual), reqPair, respPair,
-			sumPaired(reqOriginal, respOriginal), sumPaired(reqActual, respActual)))
+			sumPaired(reqOriginal, respOriginal), sumPaired(reqActual, respActual),
+			opsTrafficDirectionAggregateSQL(reqOriginal, reqActual), opsTrafficDirectionAggregateSQL(respOriginal, respActual)))
 	}
 	return "jsonb_build_object('request_count', COUNT(*),\n    " + strings.Join(links, ",\n    ") + ")"
 }

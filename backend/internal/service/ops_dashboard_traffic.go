@@ -28,4 +28,18 @@ type OpsTrafficLink struct {
 	ActualSampleCount   int64    `json:"actual_sample_count"`
 	PairedSampleCount   int64    `json:"paired_sample_count"`
 	CompressionPercent  *float64 `json:"compression_percent"`
+	// Legacy hourly aggregates may retain valid totals without a complete
+	// directional breakdown. Never infer a split from those totals.
+	Request  *OpsTrafficDirection `json:"request"`
+	Response *OpsTrafficDirection `json:"response"`
+}
+
+// OpsTrafficDirection contains measured byte sums for one body direction.
+// Each sample denominator is RequestCount, not the side's 2 * RequestCount.
+// A nil byte count means no known observation; a measured empty body is zero.
+type OpsTrafficDirection struct {
+	OriginalBytes       *int64 `json:"original_bytes"`
+	ActualBytes         *int64 `json:"actual_bytes"`
+	OriginalSampleCount int64  `json:"original_sample_count"`
+	ActualSampleCount   int64  `json:"actual_sample_count"`
 }

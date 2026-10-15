@@ -43,7 +43,11 @@ func TestOpsTrafficOverviewJSONKeepsUnknownDistinctFromMeasuredZero(t *testing.T
 	zero := int64(0)
 	value := OpsTrafficSummary{
 		Source: "http_requests", RequestCount: 1,
-		Downstream: OpsTrafficLink{OriginalBytes: &zero, ActualBytes: &zero, OriginalSampleCount: 1, ActualSampleCount: 1, PairedSampleCount: 1},
+		Downstream: OpsTrafficLink{
+			OriginalBytes: &zero, ActualBytes: &zero, OriginalSampleCount: 1, ActualSampleCount: 1, PairedSampleCount: 1,
+			Request:  &OpsTrafficDirection{OriginalBytes: &zero, ActualBytes: &zero, OriginalSampleCount: 1, ActualSampleCount: 1},
+			Response: &OpsTrafficDirection{},
+		},
 	}
 	data, err := json.Marshal(value)
 	require.NoError(t, err)
@@ -55,6 +59,19 @@ func TestOpsTrafficOverviewJSONKeepsUnknownDistinctFromMeasuredZero(t *testing.T
 	require.Nil(t, up["original_bytes"])
 	require.Equal(t, float64(0), down["original_bytes"])
 	require.Nil(t, down["compression_percent"])
+	require.Contains(t, up, "request")
+	require.Nil(t, up["request"], "missing legacy breakdown is explicit null, not an invented split")
+	require.Contains(t, up, "response")
+	require.Nil(t, up["response"])
+	request := down["request"].(map[string]any)
+	response := down["response"].(map[string]any)
+	require.Equal(t, float64(0), request["original_bytes"])
+	require.Equal(t, float64(0), request["actual_bytes"])
+	require.Equal(t, float64(1), request["original_sample_count"])
+	require.Equal(t, float64(1), request["actual_sample_count"])
+	require.Nil(t, response["original_bytes"])
+	require.Nil(t, response["actual_bytes"])
+	require.Equal(t, float64(0), response["actual_sample_count"])
 	require.Contains(t, decoded, "ingestion")
 	require.Nil(t, decoded["ingestion"])
 	require.NotContains(t, decoded, "usage_count")

@@ -29,26 +29,27 @@ function mountHeader() {
 }
 
 describe('OpsDashboardHeader traffic integration', () => {
-  it('places three traffic cards as direct output-TPS siblings and uses traffic ledger counts, not usage/error counts', async () => {
+  it('places two traffic cards as direct output-TPS siblings and uses traffic ledger counts, not usage/error counts', async () => {
     const wrapper = mountHeader()
     await flushPromises()
     const cards = wrapper.getComponent(OpsTrafficCards)
     expect(cards.props('traffic')).toEqual(traffic)
-    expect(cards.findAll('article')).toHaveLength(3)
+    expect(cards.findAll('article')).toHaveLength(2)
 
     const tps = wrapper.get('[data-testid="output-tps-card"]')
     const upstream = wrapper.get('[data-testid="traffic-upstream-card"]')
     const downstream = wrapper.get('[data-testid="traffic-downstream-card"]')
-    const composition = wrapper.get('[data-testid="traffic-composition-card"]')
-    for (const card of [upstream, downstream, composition]) {
+    const grid = tps.element.parentElement
+    expect(grid?.querySelectorAll(':scope > [style]').length).toBe(9)
+    for (const card of [upstream, downstream]) {
       expect(card.element.parentElement).toBe(tps.element.parentElement)
       expect(card.classes()).toEqual(expect.arrayContaining(tps.classes()))
     }
     expect(upstream.attributes('style')).toContain('order: 8')
     expect(downstream.attributes('style')).toContain('order: 9')
-    expect(composition.attributes('style')).toContain('order: 10')
+    expect(wrapper.find('[data-testid="traffic-composition-card"]').exists()).toBe(false)
     expect(wrapper.html().indexOf('data-testid="traffic-upstream-card"')).toBeGreaterThan(wrapper.html().indexOf('data-testid="output-tps-card"'))
-    expect(wrapper.html().indexOf('data-testid="traffic-composition-card"')).toBeLessThan(wrapper.html().indexOf('admin.ops.memory'))
+    expect(wrapper.html().indexOf('data-testid="traffic-downstream-card"')).toBeLessThan(wrapper.html().indexOf('admin.ops.memory'))
     expect(wrapper.get('[data-testid="traffic-upstream-original"]').text()).toBe('2 KiB')
     // The overview usage/error population can differ from traffic's HTTP ledger.
     expect(cards.props('traffic')?.request_count).toBe(2)

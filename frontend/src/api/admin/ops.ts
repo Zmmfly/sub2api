@@ -25,6 +25,13 @@ export type OpsUpstreamErrorEvent = {
   detail?: string
 }
 
+export interface OpsTrafficDirection {
+  original_bytes: number | null
+  actual_bytes: number | null
+  original_sample_count: number
+  actual_sample_count: number
+}
+
 /** Request + response HTTP entity-body totals for one side of the gateway. */
 export interface OpsTrafficLink {
   original_bytes: number | null
@@ -34,6 +41,9 @@ export interface OpsTrafficLink {
   paired_sample_count: number
   // Computed from paired measurements only, not from the independently covered totals.
   compression_percent: number | null
+  // Optional on older servers and historical aggregates without directional details.
+  request?: OpsTrafficDirection | null
+  response?: OpsTrafficDirection | null
 }
 
 export interface OpsTrafficIngestionHealth {

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { enableAutoUnmount, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import OpsTrafficCards from '../OpsTrafficCards.vue'
-import type { OpsTrafficLink, OpsTrafficSummary } from '@/api/admin/ops'
+import type { OpsTrafficDirection, OpsTrafficLink, OpsTrafficSummary } from '@/api/admin/ops'
 
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({ t: (key: string, params?: Record<string, unknown>) => params ? `${key}:${JSON.stringify(params)}` : key })
@@ -24,11 +24,24 @@ function tooltipFor(testId: string): HTMLElement {
   return tooltip
 }
 
+function direction(overrides: Partial<OpsTrafficDirection> = {}): OpsTrafficDirection {
+  return {
+    original_bytes: 1024,
+    actual_bytes: 512,
+    original_sample_count: 1,
+    actual_sample_count: 1,
+    ...overrides
+  }
+}
+
 function link(overrides: Partial<OpsTrafficLink> = {}): OpsTrafficLink {
   return {
     original_bytes: 4096, actual_bytes: 2048,
     original_sample_count: 4, actual_sample_count: 4, paired_sample_count: 4,
-    compression_percent: 50, ...overrides
+    compression_percent: 50,
+    request: direction({ original_sample_count: 2, actual_sample_count: 2 }),
+    response: direction({ original_bytes: 3072, actual_bytes: 1536, original_sample_count: 2, actual_sample_count: 2 }),
+    ...overrides
   }
 }
 function traffic(overrides: Partial<OpsTrafficSummary> = {}): OpsTrafficSummary {
@@ -38,7 +51,9 @@ function traffic(overrides: Partial<OpsTrafficSummary> = {}): OpsTrafficSummary 
 const unknownLink = (): OpsTrafficLink => link({
   original_bytes: null, actual_bytes: null,
   original_sample_count: 0, actual_sample_count: 0, paired_sample_count: 0,
-  compression_percent: null
+  compression_percent: null,
+  request: null,
+  response: null
 })
 
 function mountCards(value?: OpsTrafficSummary | null, loading = false) {
@@ -46,56 +61,89 @@ function mountCards(value?: OpsTrafficSummary | null, loading = false) {
 }
 
 describe('OpsTrafficCards', () => {
-  it('shows three overview-sized cards with original/actual totals and both compression rates', () => {
+  it('shows two overview-sized cards and keeps each compression rate beside its actual total', () => {
     const wrapper = mountCards(traffic({
       downstream: link({ original_bytes: 2048, actual_bytes: 2560, compression_percent: -25 })
     }))
     const articles = wrapper.findAll('article')
-    expect(articles).toHaveLength(3)
+    expect(articles).toHaveLength(2)
     for (const article of articles) {
       expect(article.classes()).toEqual(expect.arrayContaining(['min-w-0', 'rounded-2xl', 'bg-gray-50', 'p-4', 'dark:bg-dark-900']))
     }
     expect(wrapper.get('[data-testid="traffic-upstream-card"]').attributes('style')).toContain('order: 8')
     expect(wrapper.get('[data-testid="traffic-downstream-card"]').attributes('style')).toContain('order: 9')
-    expect(wrapper.get('[data-testid="traffic-composition-card"]').attributes('style')).toContain('order: 10')
+    expect(wrapper.find('[data-testid="traffic-composition-card"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="traffic-upstream-original"]').text()).toBe('4 KiB')
     expect(wrapper.get('[data-testid="traffic-upstream-actual"]').text()).toBe('2 KiB')
     expect(wrapper.get('[data-testid="traffic-downstream-original"]').text()).toBe('2 KiB')
     expect(wrapper.get('[data-testid="traffic-downstream-actual"]').text()).toBe('2.5 KiB')
-    expect(wrapper.get('[data-testid="traffic-upstream-compression"]').text()).toBe('50.0%')
-    expect(wrapper.get('[data-testid="traffic-downstream-compression"]').text()).toBe('-25.0%')
-    expect(bodyTestId('traffic-scope').textContent).toBe('admin.ops.traffic.scope')
-    expect(bodyTestId('traffic-compression-hint').textContent).toBe('admin.ops.traffic.compressionHint')
+    expect(wrapper.get('[data-testid="traffic-upstream-actual-row"]').get('[data-testid="traffic-upstream-compression"]').text()).toBe('50.0%')
+    expect(wrapper.get('[data-testid="traffic-downstream-actual-row"]').get('[data-testid="traffic-downstream-compression"]').text()).toBe('-25.0%')
+    expect(wrapper.get('[data-testid="traffic-upstream-original-row"]').find('[data-testid="traffic-upstream-compression"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-testid$="-breakdown-tooltip"]')).toHaveLength(4)
+    expect(bodyTestId('traffic-upstream-scope').textContent).toBe('admin.ops.traffic.scope')
+    expect(bodyTestId('traffic-upstream-compression-hint').textContent).toBe('admin.ops.traffic.compressionHint')
   })
 
   it('keeps long scope, formula and coverage details hidden until their help icons are hovered', async () => {
     const wrapper = mountCards(traffic())
-    const composition = wrapper.get('[data-testid="traffic-composition-card"]')
-    expect(composition.text()).not.toContain('admin.ops.traffic.scope')
-    expect(composition.text()).not.toContain('admin.ops.traffic.compressionHint')
-    expect(composition.text()).not.toContain('admin.ops.traffic.pairedCoverage')
+    const upstream = wrapper.get('[data-testid="traffic-upstream-card"]')
+    expect(upstream.text()).not.toContain('admin.ops.traffic.scope')
+    expect(upstream.text()).not.toContain('admin.ops.traffic.compressionHint')
+    expect(upstream.text()).not.toContain('admin.ops.traffic.pairedCoverage')
 
-    const compositionTooltip = tooltipFor('traffic-scope')
-    expect(compositionTooltip.style.display).toBe('none')
-    const compositionTrigger = wrapper.get('[data-testid="traffic-composition-tooltip"]')
-    await compositionTrigger.trigger('mouseenter')
+    const detailsTooltip = tooltipFor('traffic-upstream-scope')
+    expect(detailsTooltip.style.display).toBe('none')
+    const detailsTrigger = wrapper.get('[data-testid="traffic-upstream-coverage-tooltip"]')
+    await detailsTrigger.trigger('mouseenter')
     await nextTick()
-    expect(compositionTooltip.style.display).not.toBe('none')
-    expect(compositionTooltip.textContent).toContain('admin.ops.traffic.scope')
-    expect(compositionTooltip.textContent).toContain('admin.ops.traffic.compressionHint')
-    expect(compositionTooltip.textContent).toContain('admin.ops.traffic.pairedCoverage')
-    expect(compositionTooltip.textContent).toContain('admin.ops.traffic.upstream')
-    expect(compositionTooltip.textContent).toContain('admin.ops.traffic.downstream')
-    await compositionTrigger.trigger('mouseleave')
+    expect(detailsTooltip.style.display).not.toBe('none')
+    expect(detailsTooltip.textContent).toContain('admin.ops.traffic.scope')
+    expect(detailsTooltip.textContent).toContain('admin.ops.traffic.compressionHint')
+    expect(detailsTooltip.textContent).toContain('admin.ops.traffic.pairedCoverage')
+    await detailsTrigger.trigger('mouseleave')
     await nextTick()
-    expect(compositionTooltip.style.display).toBe('none')
+    expect(detailsTooltip.style.display).toBe('none')
+  })
 
-    const coverageTooltip = tooltipFor('traffic-upstream-original-coverage')
-    const coverageTrigger = wrapper.get('[data-testid="traffic-upstream-coverage-tooltip"]')
-    await coverageTrigger.trigger('mouseenter')
+  it('shows direction-specific original and actual bytes with request-count coverage in separate tooltips', async () => {
+    const wrapper = mountCards(traffic({
+      downstream: link({
+        original_sample_count: 2,
+        actual_sample_count: 2,
+        paired_sample_count: 2,
+        request: direction({ original_bytes: 100, actual_bytes: 50, original_sample_count: 1, actual_sample_count: 1 }),
+        response: direction({ original_bytes: 200, actual_bytes: 150, original_sample_count: 1, actual_sample_count: 1 })
+      })
+    }))
+
+    const originalTooltip = tooltipFor('traffic-upstream-request-original')
+    expect(originalTooltip.style.display).toBe('none')
+    const originalTrigger = wrapper.get('[data-testid="traffic-upstream-original-breakdown-tooltip"]')
+    await originalTrigger.trigger('mouseenter')
     await nextTick()
-    expect(coverageTooltip.style.display).not.toBe('none')
-    expect(coverageTooltip.textContent).toContain('admin.ops.traffic.coverage')
+    expect(originalTooltip.style.display).not.toBe('none')
+    expect(bodyTestId('traffic-upstream-request-original').textContent).toBe('1 KiB')
+    expect(bodyTestId('traffic-upstream-response-original').textContent).toBe('3 KiB')
+    expect(bodyTestId('traffic-upstream-request-original-coverage').textContent).toContain('admin.ops.traffic.directionCoverage:{"count":2,"total":2}')
+    expect(bodyTestId('traffic-upstream-response-original-coverage').textContent).toContain('admin.ops.traffic.directionCoverage:{"count":2,"total":2}')
+    await originalTrigger.trigger('mouseleave')
+    await nextTick()
+
+    const actualTrigger = wrapper.get('[data-testid="traffic-upstream-actual-breakdown-tooltip"]')
+    await actualTrigger.trigger('mouseenter')
+    await nextTick()
+    const actualTooltip = tooltipFor('traffic-upstream-request-actual')
+    expect(actualTooltip.style.display).not.toBe('none')
+    expect(bodyTestId('traffic-upstream-request-actual').textContent).toBe('512 B')
+    expect(bodyTestId('traffic-upstream-response-actual').textContent).toBe('1.5 KiB')
+    expect(bodyTestId('traffic-upstream-request-actual-coverage').textContent).toContain('admin.ops.traffic.directionCoverage:{"count":2,"total":2}')
+    expect(bodyTestId('traffic-upstream-response-actual-coverage').textContent).toContain('admin.ops.traffic.directionCoverage:{"count":2,"total":2}')
+
+    expect(bodyTestId('traffic-downstream-request-original').textContent).toBe('100 B')
+    expect(bodyTestId('traffic-downstream-response-original').textContent).toBe('200 B')
+    expect(bodyTestId('traffic-downstream-request-actual').textContent).toBe('50 B')
+    expect(bodyTestId('traffic-downstream-response-actual').textContent).toBe('150 B')
   })
 
   it.each([undefined, null, traffic({ upstream: unknownLink(), downstream: unknownLink() })])(
@@ -106,6 +154,11 @@ describe('OpsTrafficCards', () => {
           expect(wrapper.get(`[data-testid="traffic-${side}-${metric}"]`).text()).toBe('—')
         }
         expect(wrapper.get(`[data-testid="traffic-${side}-coverage-state"]`).text()).toBe('admin.ops.traffic.unavailable')
+        for (const direction of ['request', 'response']) {
+          expect(bodyTestId(`traffic-${side}-${direction}-original`).textContent).toBe('—')
+          expect(bodyTestId(`traffic-${side}-${direction}-actual`).textContent).toBe('—')
+          expect(bodyTestId(`traffic-${side}-${direction}-original-coverage`).textContent).toContain('admin.ops.traffic.coverageUnknown')
+        }
       }
       expect(wrapper.text()).not.toContain('0 B')
     }
@@ -113,12 +166,20 @@ describe('OpsTrafficCards', () => {
 
   it('distinguishes measured empty bodies from no measurements and keeps zero-original compression unknown', () => {
     const wrapper = mountCards(traffic({
-      upstream: link({ original_bytes: 0, actual_bytes: 0, compression_percent: null }),
+      upstream: link({
+        original_bytes: 0,
+        actual_bytes: 0,
+        compression_percent: null,
+        request: direction({ original_bytes: 0, actual_bytes: 0, original_sample_count: 2, actual_sample_count: 2 }),
+        response: direction({ original_bytes: 0, actual_bytes: 0, original_sample_count: 2, actual_sample_count: 2 })
+      }),
       downstream: link({ original_bytes: null, actual_bytes: 0, original_sample_count: 0, paired_sample_count: 0, compression_percent: null })
     }))
     expect(wrapper.get('[data-testid="traffic-upstream-original"]').text()).toBe('0 B')
     expect(wrapper.get('[data-testid="traffic-upstream-actual"]').text()).toBe('0 B')
     expect(wrapper.get('[data-testid="traffic-upstream-compression"]').text()).toBe('—')
+    expect(bodyTestId('traffic-upstream-request-original').textContent).toBe('0 B')
+    expect(bodyTestId('traffic-upstream-response-actual').textContent).toBe('0 B')
     expect(wrapper.get('[data-testid="traffic-downstream-original"]').text()).toBe('—')
     expect(wrapper.get('[data-testid="traffic-downstream-actual"]').text()).toBe('0 B')
     expect(wrapper.get('[data-testid="traffic-downstream-compression"]').text()).toBe('—')
@@ -127,13 +188,13 @@ describe('OpsTrafficCards', () => {
   it('shows per-metric and paired coverage and uses the server paired ratio rather than independently covered totals', () => {
     const wrapper = mountCards(traffic({
       request_count: 5,
-      upstream: link({ original_bytes: 100, actual_bytes: 500, original_sample_count: 4, actual_sample_count: 7, paired_sample_count: 2, compression_percent: 25 })
+      upstream: link({ original_bytes: 100, actual_bytes: 500, original_sample_count: 4, actual_sample_count: 7, paired_sample_count: 2, compression_percent: 25, request: null, response: null })
     }))
     expect(bodyTestId('traffic-upstream-original-coverage').textContent).toContain('admin.ops.traffic.original')
     expect(bodyTestId('traffic-upstream-original-coverage').textContent).toContain('admin.ops.traffic.coverage:{"count":4,"total":10}')
     expect(bodyTestId('traffic-upstream-actual-coverage').textContent).toContain('admin.ops.traffic.actual')
     expect(bodyTestId('traffic-upstream-actual-coverage').textContent).toContain('admin.ops.traffic.coverage:{"count":7,"total":10}')
-    expect(bodyTestId('traffic-upstream-paired-coverage').textContent).toContain('admin.ops.traffic.upstream')
+    expect(bodyTestId('traffic-upstream-paired-coverage').textContent).toContain('admin.ops.traffic.compression')
     expect(bodyTestId('traffic-upstream-paired-coverage').textContent).toContain('admin.ops.traffic.pairedCoverage:{"count":2,"total":10}')
     expect(wrapper.get('[data-testid="traffic-upstream-coverage-state"]').text()).toBe('admin.ops.traffic.partial')
     expect(wrapper.get('[data-testid="traffic-upstream-compression"]').text()).toBe('25.0%')
@@ -164,10 +225,11 @@ describe('OpsTrafficCards', () => {
   it('marks loading and hides stale totals, coverage and ratios until the filtered overview arrives', async () => {
     const wrapper = mountCards(traffic(), true)
     expect(wrapper.get('[data-testid="traffic-upstream-card"]').attributes('aria-busy')).toBe('true')
-    expect(wrapper.get('[data-testid="traffic-composition-card"]').attributes('aria-busy')).toBe('true')
+    expect(wrapper.get('[data-testid="traffic-downstream-card"]').attributes('aria-busy')).toBe('true')
     expect(wrapper.get('[role="status"]').text()).toBe('admin.ops.loadingText')
     expect(wrapper.find('[data-testid="traffic-upstream-original"]').exists()).toBe(false)
     expect(document.body.querySelector('[data-testid="traffic-upstream-original-coverage"]')).toBeNull()
+    expect(document.body.querySelector('[data-testid="traffic-upstream-request-original"]')).toBeNull()
     expect(wrapper.find('[data-testid="traffic-upstream-compression"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="traffic-upstream-coverage-state"]').exists()).toBe(false)
     await wrapper.setProps({ loading: false, traffic: traffic({ upstream: link({ original_bytes: 1024 ** 2 }) }) })
@@ -205,7 +267,10 @@ describe('OpsTrafficCards ingestion health', () => {
     const warning = wrapper.get('[data-testid="traffic-ingestion-warning"]')
     expect(warning.attributes('role')).toBe('alert')
     expect(warning.classes()).toContain('bg-red-50')
+    expect(warning.get('[data-testid="traffic-ingestion-instance"]').text()).toBe('admin.ops.traffic.instance')
     expect(warning.get('[data-testid="traffic-ingestion-failed-short"]').text()).toBe('admin.ops.traffic.ingestionFailedShort:{"count":3}')
+    expect(wrapper.get('[data-testid="traffic-upstream-card"]').find('[data-testid="traffic-ingestion-warning"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="traffic-downstream-card"]').find('[data-testid="traffic-ingestion-warning"]').exists()).toBe(true)
     expect(warning.text()).not.toContain('admin.ops.traffic.ingestionScope')
     const tooltip = tooltipFor('traffic-ingestion-failed')
     expect(tooltip.style.display).toBe('none')

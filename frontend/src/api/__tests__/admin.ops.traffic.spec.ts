@@ -13,7 +13,19 @@ const traffic: OpsTrafficSummary = {
     original_sample_count: 2,
     actual_sample_count: 3,
     paired_sample_count: 2,
-    compression_percent: -20
+    compression_percent: -20,
+    request: {
+      original_bytes: 40,
+      actual_bytes: 50,
+      original_sample_count: 1,
+      actual_sample_count: 2
+    },
+    response: {
+      original_bytes: 60,
+      actual_bytes: 70,
+      original_sample_count: 1,
+      actual_sample_count: 1
+    }
   },
   downstream: {
     original_bytes: null,
@@ -52,6 +64,10 @@ describe('admin ops traffic overview transport', () => {
     const result = await getDashboardSnapshotV2(params, { signal })
     expect(result).toBe(data)
     expect(result.overview.traffic?.upstream.compression_percent).toBe(-20)
+    expect(result.overview.traffic?.upstream.request?.actual_bytes).toBe(50)
+    expect(result.overview.traffic?.upstream.response?.original_bytes).toBe(60)
+    expect(result.overview.traffic?.downstream.request).toBeUndefined()
+    expect(result.overview.traffic?.downstream.response).toBeUndefined()
     expect(result.overview.traffic?.downstream.original_bytes).toBeNull()
     expect(result.overview.traffic?.downstream.actual_bytes).toBe(0)
     expect(get).toHaveBeenCalledTimes(1)

@@ -12,6 +12,7 @@ import type { OpsRequestDetailsPreset } from './OpsRequestDetailsModal.vue'
 import { useAdminSettingsStore } from '@/stores'
 import { formatDateTimeLocalInput, formatNumber } from '@/utils/format'
 import { formatMemorySizeMB } from '../utils/opsFormatters'
+import OpsTrafficCards from './OpsTrafficCards.vue'
 
 type RealtimeWindow = '1min' | '5min' | '30min' | '1h'
 
@@ -1452,6 +1453,9 @@ function handleToolbarRefresh() {
         </div>
       </div>
     </div>
+
+    <!-- Entity-body traffic shares the overview's time/platform/group/query-mode filters. -->
+    <OpsTrafficCards v-if="overview" :traffic="overview.traffic" :loading="props.loading" />
 
     <!-- Integrated: System health (cards) -->
     <div v-if="overview" class="mt-2 border-t border-gray-100 pt-4 dark:border-dark-700">

@@ -25,6 +25,36 @@ export type OpsUpstreamErrorEvent = {
   detail?: string
 }
 
+/** Request + response HTTP entity-body totals for one side of the gateway. */
+export interface OpsTrafficLink {
+  original_bytes: number | null
+  actual_bytes: number | null
+  original_sample_count: number
+  actual_sample_count: number
+  paired_sample_count: number
+  // Computed from paired measurements only, not from the independently covered totals.
+  compression_percent: number | null
+}
+
+export interface OpsTrafficIngestionHealth {
+  // Current process lifetime only, not the selected filters or the whole cluster.
+  scope: 'instance_lifetime'
+  pending: number
+  failed: number
+  flushed: number
+}
+
+export interface OpsTrafficSummary {
+  source: 'http_requests'
+  // Each persisted HTTP request contributes two possible body measurements per
+  // side, independent of usage/error logging (including failed requests).
+  request_count: number
+  upstream: OpsTrafficLink
+  downstream: OpsTrafficLink
+  // Missing/null means unavailable, not proof of loss-free ingestion.
+  ingestion?: OpsTrafficIngestionHealth | null
+}
+
 export interface OpsDashboardOverview {
   start_time: string
   end_time: string
@@ -70,6 +100,9 @@ export interface OpsDashboardOverview {
     avg: number | null
     sample_count: number
   } | null
+
+  // Missing on older servers; null/unknown measurements must never become zero.
+  traffic?: OpsTrafficSummary | null
 
   duration: OpsPercentiles
   ttft: OpsPercentiles

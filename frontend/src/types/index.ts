@@ -1765,6 +1765,27 @@ export type UsageRequestType = 'unknown' | 'sync' | 'stream' | 'ws_v2' | 'cyber'
 export type ImageSizeSource = 'output' | 'input' | 'default' | 'legacy'
 export type ImageSizeBreakdown = Record<string, number>
 
+/** Measured HTTP entity-body bytes; null is unknown, zero is a measured empty body. */
+export interface TrafficMeasurement {
+  original_bytes: number | null
+  actual_bytes: number | null
+  compressed: boolean
+}
+
+export interface TrafficLink {
+  request?: TrafficMeasurement | null
+  response?: TrafficMeasurement | null
+}
+
+/** User-facing usage DTOs never expose the gateway-to-provider link. */
+export interface UserUsageTraffic {
+  downstream?: TrafficLink | null
+}
+
+export interface UsageTraffic extends UserUsageTraffic {
+  upstream?: TrafficLink | null
+}
+
 export interface UsageLog {
   id: number
   user_id: number
@@ -1803,6 +1824,7 @@ export interface UsageLog {
   native_compaction_v2: boolean
   duration_ms: number | null
   first_token_ms: number | null
+  traffic?: UserUsageTraffic | null
 
   // 图片生成字段
   image_count: number
@@ -1840,6 +1862,7 @@ export interface UsageLogAccountSummary {
 }
 
 export interface AdminUsageLog extends UsageLog {
+  traffic?: UsageTraffic | null
   upstream_model?: string | null
   upstream_reasoning_effort?: string | null
   upstream_response_model?: string | null

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/traffic"
 	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -57,6 +58,8 @@ type compressResponseWriter struct {
 	ctx        context.Context // Close/Flush 出错时用于记录日志
 	compressor compressFlusher
 	state      compressState
+	traffic    *traffic.Counter
+	head       bool
 	// headersPrepared 标记提交前响应头已统一补齐 Vary/ETag，避免重复处理。
 	headersPrepared bool
 	// plainSize 记录压缩激活后已接收的明文字节数：
@@ -91,6 +94,8 @@ func ResponseCompress() gin.HandlerFunc {
 			ResponseWriter: c.Writer,
 			encoding:       encoding,
 			ctx:            c.Request.Context(),
+			traffic:        traffic.ResponseCounter(c.Request.Context()),
+			head:           c.Request.Method == http.MethodHead,
 		}
 		c.Writer = writer
 		// defer 保证 handler panic 展开时也能关闭压缩器，刷尽尾部数据；
@@ -224,6 +229,11 @@ func (w *compressResponseWriter) Write(data []byte) (int, error) {
 	if w.state == compressStateActive {
 		n, err := w.compressor.Write(data)
 		w.plainSize += n
+		w.traffic.AddOriginal(n)
+		if err != nil {
+			w.traffic.FailOriginal()
+			w.traffic.FailActual()
+		}
 		return n, err
 	}
 	return w.ResponseWriter.Write(data)
@@ -239,6 +249,11 @@ func (w *compressResponseWriter) WriteString(data string) (int, error) {
 	if w.state == compressStateActive {
 		n, err := w.compressor.Write([]byte(data))
 		w.plainSize += n
+		w.traffic.AddOriginal(n)
+		if err != nil {
+			w.traffic.FailOriginal()
+			w.traffic.FailActual()
+		}
 		return n, err
 	}
 	return w.ResponseWriter.WriteString(data)
@@ -287,6 +302,8 @@ func (w *compressResponseWriter) Flush() {
 	w.prepareCommitHeaders()
 	if w.compressor != nil {
 		if err := w.compressor.Flush(); err != nil {
+			w.traffic.FailActual()
+			w.traffic.FailOriginal()
 			logCompressError(w.ctx, "flush response compressor", w.encoding, err)
 		}
 	}
@@ -321,7 +338,8 @@ func (w *compressResponseWriter) initCompressor() {
 		return
 	}
 	w.state = compressStatePassthrough
-	if w.encoding == "" {
+	if w.encoding == "" || w.head {
+		// HEAD has no entity body; don't count hypothetical compressed bytes.
 		// 协商结果为不压缩：包装器仅维护 Vary/ETag 缓存语义
 		return
 	}
@@ -335,7 +353,7 @@ func (w *compressResponseWriter) initCompressor() {
 		return
 	}
 	header := w.ResponseWriter.Header()
-	if strings.TrimSpace(header.Get("Content-Encoding")) != "" {
+	if strings.TrimSpace(traffic.ContentEncoding(header)) != "" {
 		// handler/上游已设置编码，不重复压缩
 		return
 	}
@@ -348,6 +366,7 @@ func (w *compressResponseWriter) initCompressor() {
 	header.Del(headerContentLength)
 	w.compressor = compressor
 	w.state = compressStateActive
+	w.traffic.SetCompressed()
 }
 
 // close 关闭压缩器，确保尾部数据完整刷出；Close 错误仅记录日志
@@ -362,7 +381,11 @@ func (w *compressResponseWriter) close() {
 	w.compressor = nil
 	w.state = compressStatePassthrough
 	if err != nil {
+		w.traffic.FailActual()
+		w.traffic.FailOriginal()
 		logCompressError(w.ctx, "close response compressor", w.encoding, err)
+	} else {
+		w.traffic.CompleteOriginal()
 	}
 }
 

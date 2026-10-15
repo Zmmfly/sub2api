@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -300,12 +301,15 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 // caller's context (which may be detached for billing or reused for retries).
 func doUpstreamRequest(client *http.Client, req *http.Request) (*http.Response, error) {
 	ctx, cancel := context.WithCancel(req.Context())
+	client = httpClientWithTraffic(client)
 	resp, err := servertiming.Do(client, req.WithContext(ctx))
 	if err != nil {
 		cancel()
 		return resp, err
 	}
-	decompressResponseBody(resp)
+	if req.Method != http.MethodHead {
+		decompressResponseBodyLazy(resp, nil)
+	}
 	resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
 	return resp, nil
 }
@@ -1528,53 +1532,98 @@ func wrapTrackedBody(body io.ReadCloser, onClose func()) io.ReadCloser {
 // decompressResponseBody 根据 Content-Encoding 解压响应体。
 // 当请求显式设置了 accept-encoding 时，Go 的 Transport 不会自动解压，需要手动处理。
 // 解压成功后会删除 Content-Encoding 和 Content-Length header（长度已不准确）。
-func decompressResponseBody(resp *http.Response) {
+func decompressResponseBody(resp *http.Response) bool {
+	decoded, _ := decodeResponseBody(resp)
+	return decoded
+}
+
+// decodeResponseBody preserves the underlying I/O/codec error so lazy callers
+// can distinguish cancellation and network failure from malformed encoding.
+func decodeResponseBody(resp *http.Response) (bool, error) {
 	if resp == nil || resp.Body == nil {
-		return
+		return false, nil
 	}
-	ce := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
-	if ce == "" {
-		return
+	ce := strings.ToLower(strings.TrimSpace(strings.Join(resp.Header.Values("Content-Encoding"), ",")))
+	if ce == "" || ce == "identity" {
+		return false, nil
 	}
 
 	originalBody := resp.Body
+	bufferedBody := bufio.NewReader(originalBody)
+	// Preserve undecodable bytes, including bytes consumed by decoder creation.
+	// Failed decoding must not silently turn a real body into an empty one.
+	resp.Body = &decompressedBody{reader: bufferedBody, closer: originalBody}
+	initializer := &decoderInitReader{Reader: bufferedBody, captured: &bytes.Buffer{}}
+	failed := func(err error) (bool, error) {
+		resp.Body = &decompressedBody{reader: io.MultiReader(bytes.NewReader(initializer.captured.Bytes()), bufferedBody), closer: originalBody}
+		return false, err
+	}
 	var reader io.Reader
 	switch ce {
-	case "gzip":
-		gr, err := gzip.NewReader(resp.Body)
+	case "gzip", "x-gzip":
+		gr, err := gzip.NewReader(initializer)
 		if err != nil {
-			return // 解压失败，保持原样
+			return failed(err)
 		}
 		reader = gr
 	case "br":
-		reader = brotli.NewReader(resp.Body)
+		reader = brotli.NewReader(bufferedBody)
 	case "deflate":
-		reader = flate.NewReader(resp.Body)
+		// HTTP deflate is zlib-wrapped (RFC 1950). Retain compatibility with
+		// legacy upstreams emitting a raw RFC 1951 stream.
+		header, peekErr := bufferedBody.Peek(2)
+		if peekErr != nil && len(header) < 2 {
+			return failed(peekErr)
+		}
+		if len(header) == 2 && header[0]&15 == 8 && (int(header[0])*256+int(header[1]))%31 == 0 {
+			zr, err := zlib.NewReader(initializer)
+			if err != nil {
+				return failed(err)
+			}
+			reader = zr
+		} else {
+			reader = flate.NewReader(bufferedBody)
+		}
 	case "zstd":
-		bufferedBody := bufio.NewReader(resp.Body)
-		resp.Body = &decompressedBody{reader: bufferedBody, closer: originalBody}
-
-		headerBytes, _ := bufferedBody.Peek(zstd.HeaderMaxSize)
+		headerBytes, peekErr := bufferedBody.Peek(zstd.HeaderMaxSize)
 		var header zstd.Header
 		if err := header.Decode(headerBytes); err != nil {
+			if peekErr != nil && !errors.Is(peekErr, io.EOF) {
+				err = peekErr
+			}
 			slog.Warn("zstd_decompress_failed", "error", err)
-			return
+			return false, err
 		}
-
 		zr, err := zstd.NewReader(bufferedBody)
 		if err != nil {
 			slog.Warn("zstd_decompress_failed", "error", err)
-			return
+			return false, err
 		}
 		reader = &zstdResponseReader{ReadCloser: zr.IOReadCloser()}
 	default:
-		return
+		return false, nil
 	}
-
+	initializer.captured = nil
 	resp.Body = &decompressedBody{reader: reader, closer: originalBody}
 	resp.Header.Del("Content-Encoding")
 	resp.Header.Del("Content-Length") // 解压后长度不确定
 	resp.ContentLength = -1
+	return true, nil
+}
+
+// decoderInitReader records only decoder construction reads for lossless error
+// fallback; once initialized it stops retaining bytes (streaming stays bounded).
+type decoderInitReader struct {
+	io.Reader
+	captured *bytes.Buffer
+}
+
+func (r *decoderInitReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if r.captured != nil {
+		_, _ = r.captured.Write(p[:n])
+	}
+	return n, err
 }
 
 type zstdResponseReader struct {

@@ -94,7 +94,7 @@ describe('OpsTrafficCards', () => {
     expect(bodyTestId('traffic-upstream-compression-hint').textContent).toBe('admin.ops.traffic.compressionHint')
   })
 
-  it('puts equivalent bandwidth after each byte total without replacing the actual compression rate', () => {
+  it('shows only a comma-separated rate beside each metric label and keeps compression beside the actual total', () => {
     const wrapper = mountCards(traffic({
       upstream: link({ original_bytes: 7_500_000, actual_bytes: 3_750_000 }),
       downstream: link({ original_bytes: 15_000_000, actual_bytes: 18_750_000, compression_percent: -25 })
@@ -105,10 +105,15 @@ describe('OpsTrafficCards', () => {
       ['downstream', 'original', '2 Mbps'],
       ['downstream', 'actual', '2.5 Mbps']
     ]) {
+      const label = wrapper.get(`[data-testid="traffic-${side}-${metric}-label"]`)
       const row = wrapper.get(`[data-testid="traffic-${side}-${metric}-row"]`)
-      const bandwidth = row.get(`[data-testid="traffic-${side}-${metric}-bandwidth"]`)
+      const bandwidth = label.get(`[data-testid="traffic-${side}-${metric}-bandwidth"]`)
+      expect(label.element.tagName).toBe('DT')
+      expect(label.classes()).toContain('text-xs')
+      expect(label.text()).toBe(`admin.ops.traffic.${metric}, ${expected}`)
+      expect(label.text()).not.toContain('admin.ops.traffic.bandwidth')
       expect(bandwidth.text()).toBe(expected)
-      expect(row.html().indexOf(`data-testid="traffic-${side}-${metric}-bandwidth"`)).toBeGreaterThan(row.html().indexOf(`data-testid="traffic-${side}-${metric}"`))
+      expect(row.find(`[data-testid="traffic-${side}-${metric}-bandwidth"]`).exists()).toBe(false)
     }
     expect(wrapper.get('[data-testid="traffic-upstream-compression"]').text()).toBe('50.0%')
     expect(wrapper.get('[data-testid="traffic-downstream-compression"]').text()).toBe('-25.0%')
@@ -340,6 +345,11 @@ describe('OpsTrafficCards', () => {
     expect(wrapper.find('[data-testid="traffic-upstream-original-bandwidth"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="traffic-upstream-actual-bandwidth"]').exists()).toBe(false)
     expect(document.body.querySelector('[data-testid="traffic-upstream-original-bandwidth-hint"]')).toBeNull()
+    for (const side of ['upstream', 'downstream']) {
+      for (const metric of ['original', 'actual']) {
+        expect(wrapper.get(`[data-testid="traffic-${side}-${metric}-label"]`).text()).toBe(`admin.ops.traffic.${metric}`)
+      }
+    }
     expect(document.body.querySelector('[data-testid="traffic-upstream-original-coverage"]')).toBeNull()
     expect(document.body.querySelector('[data-testid="traffic-upstream-request-original"]')).toBeNull()
     expect(wrapper.find('[data-testid="traffic-upstream-compression"]').exists()).toBe(false)

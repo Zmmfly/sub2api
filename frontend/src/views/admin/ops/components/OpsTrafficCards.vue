@@ -167,7 +167,27 @@ function compressionLabel(summary: OpsTrafficLink | undefined): string {
 
     <dl class="mt-2 space-y-2">
       <div v-for="metric in measurements" :key="metric.key">
-        <dt class="text-xs text-gray-500 dark:text-gray-400">{{ t(`admin.ops.traffic.${metric.key}`) }}</dt>
+        <dt class="text-xs text-gray-500 dark:text-gray-400" :data-testid="`traffic-${side.key}-${metric.key}-label`">
+          <span>{{ t(`admin.ops.traffic.${metric.key}`) }}</span>
+          <template v-if="!loading">
+            <span aria-hidden="true">, </span>
+            <HelpTooltip
+              class="!ml-0 min-w-0 cursor-help rounded !align-baseline outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+              tabindex="0"
+              width-class="w-80 max-w-[calc(100vw-2rem)]"
+              :aria-label="`${t('admin.ops.traffic.bandwidth')} ${formatTrafficBandwidth(side.summary?.[metric.bytes], durationSeconds)}`"
+              :data-testid="`traffic-${side.key}-${metric.key}-bandwidth-tooltip`"
+            >
+              <template #trigger>
+                <span
+                  class="whitespace-nowrap tabular-nums"
+                  :data-testid="`traffic-${side.key}-${metric.key}-bandwidth`"
+                >{{ formatTrafficBandwidth(side.summary?.[metric.bytes], durationSeconds) }}</span>
+              </template>
+              <p :data-testid="`traffic-${side.key}-${metric.key}-bandwidth-hint`">{{ t('admin.ops.traffic.bandwidthHint') }}</p>
+            </HelpTooltip>
+          </template>
+        </dt>
         <dd class="mt-1" :data-testid="`traffic-${side.key}-${metric.key}-row`">
           <div v-if="loading" class="h-9 w-28 animate-pulse rounded bg-gray-200 dark:bg-dark-700" aria-hidden="true"></div>
           <div v-else class="flex min-w-0 flex-wrap items-baseline gap-x-1 gap-y-1">
@@ -199,24 +219,6 @@ function compressionLabel(summary: OpsTrafficLink | undefined): string {
                   >{{ directionCoverageText(side.summary?.[direction]?.[metric.count]) }}</p>
                 </div>
               </div>
-            </HelpTooltip>
-            <HelpTooltip
-              class="!ml-0 min-w-0 cursor-help rounded text-xs text-gray-500 outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:text-gray-400"
-              tabindex="0"
-              width-class="w-80 max-w-[calc(100vw-2rem)]"
-              :aria-label="`${t('admin.ops.traffic.bandwidth')} ${formatTrafficBandwidth(side.summary?.[metric.bytes], durationSeconds)}`"
-              :data-testid="`traffic-${side.key}-${metric.key}-bandwidth-tooltip`"
-            >
-              <template #trigger>
-                <span class="inline-flex flex-wrap items-baseline gap-x-1">
-                  <span>{{ t('admin.ops.traffic.bandwidth') }}</span>
-                  <span
-                    class="whitespace-nowrap font-semibold tabular-nums"
-                    :data-testid="`traffic-${side.key}-${metric.key}-bandwidth`"
-                  >{{ formatTrafficBandwidth(side.summary?.[metric.bytes], durationSeconds) }}</span>
-                </span>
-              </template>
-              <p :data-testid="`traffic-${side.key}-${metric.key}-bandwidth-hint`">{{ t('admin.ops.traffic.bandwidthHint') }}</p>
             </HelpTooltip>
             <span
               v-if="metric.key === 'actual'"

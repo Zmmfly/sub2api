@@ -2297,6 +2297,7 @@ type AccountMutation struct {
 	extra                       *map[string]interface{}
 	proxy_fallback_origin_id    *int64
 	addproxy_fallback_origin_id *int64
+	compress_request_enabled    *bool
 	concurrency                 *int
 	addconcurrency              *int
 	load_factor                 *int
@@ -2904,6 +2905,42 @@ func (m *AccountMutation) ResetProxyFallbackOriginID() {
 	m.proxy_fallback_origin_id = nil
 	m.addproxy_fallback_origin_id = nil
 	delete(m.clearedFields, account.FieldProxyFallbackOriginID)
+}
+
+// SetCompressRequestEnabled sets the "compress_request_enabled" field.
+func (m *AccountMutation) SetCompressRequestEnabled(b bool) {
+	m.compress_request_enabled = &b
+}
+
+// CompressRequestEnabled returns the value of the "compress_request_enabled" field in the mutation.
+func (m *AccountMutation) CompressRequestEnabled() (r bool, exists bool) {
+	v := m.compress_request_enabled
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCompressRequestEnabled returns the old "compress_request_enabled" field's value of the Account entity.
+// If the Account object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AccountMutation) OldCompressRequestEnabled(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCompressRequestEnabled is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCompressRequestEnabled requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCompressRequestEnabled: %w", err)
+	}
+	return oldValue.CompressRequestEnabled, nil
+}
+
+// ResetCompressRequestEnabled resets all changes to the "compress_request_enabled" field.
+func (m *AccountMutation) ResetCompressRequestEnabled() {
+	m.compress_request_enabled = nil
 }
 
 // SetConcurrency sets the "concurrency" field.
@@ -4139,7 +4176,7 @@ func (m *AccountMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AccountMutation) Fields() []string {
-	fields := make([]string, 0, 31)
+	fields := make([]string, 0, 32)
 	if m.created_at != nil {
 		fields = append(fields, account.FieldCreatedAt)
 	}
@@ -4172,6 +4209,9 @@ func (m *AccountMutation) Fields() []string {
 	}
 	if m.proxy_fallback_origin_id != nil {
 		fields = append(fields, account.FieldProxyFallbackOriginID)
+	}
+	if m.compress_request_enabled != nil {
+		fields = append(fields, account.FieldCompressRequestEnabled)
 	}
 	if m.concurrency != nil {
 		fields = append(fields, account.FieldConcurrency)
@@ -4263,6 +4303,8 @@ func (m *AccountMutation) Field(name string) (ent.Value, bool) {
 		return m.ProxyID()
 	case account.FieldProxyFallbackOriginID:
 		return m.ProxyFallbackOriginID()
+	case account.FieldCompressRequestEnabled:
+		return m.CompressRequestEnabled()
 	case account.FieldConcurrency:
 		return m.Concurrency()
 	case account.FieldLoadFactor:
@@ -4334,6 +4376,8 @@ func (m *AccountMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldProxyID(ctx)
 	case account.FieldProxyFallbackOriginID:
 		return m.OldProxyFallbackOriginID(ctx)
+	case account.FieldCompressRequestEnabled:
+		return m.OldCompressRequestEnabled(ctx)
 	case account.FieldConcurrency:
 		return m.OldConcurrency(ctx)
 	case account.FieldLoadFactor:
@@ -4459,6 +4503,13 @@ func (m *AccountMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetProxyFallbackOriginID(v)
+		return nil
+	case account.FieldCompressRequestEnabled:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCompressRequestEnabled(v)
 		return nil
 	case account.FieldConcurrency:
 		v, ok := value.(int)
@@ -4849,6 +4900,9 @@ func (m *AccountMutation) ResetField(name string) error {
 		return nil
 	case account.FieldProxyFallbackOriginID:
 		m.ResetProxyFallbackOriginID()
+		return nil
+	case account.FieldCompressRequestEnabled:
+		m.ResetCompressRequestEnabled()
 		return nil
 	case account.FieldConcurrency:
 		m.ResetConcurrency()

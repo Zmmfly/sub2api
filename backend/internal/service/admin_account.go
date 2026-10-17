@@ -289,6 +289,7 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 		expiresAt = &unix
 	}
 	autoPauseOnExpired := source.AutoPauseOnExpired
+	compressRequestEnabled := source.CompressRequestEnabled
 	groups, groupIDs := duplicateAccountGroups(source)
 	if err := s.ValidateAccountGroupBindings(ctx, groupIDs); err != nil {
 		return nil, err
@@ -299,22 +300,23 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 		proxyID = source.ProxyFallbackOriginID
 	}
 	input := &CreateAccountInput{
-		Name:                  duplicateAccountName(source.Name),
-		Notes:                 cloneAccountValuePointer(source.Notes),
-		Platform:              source.Platform,
-		Type:                  source.Type,
-		Credentials:           credentials,
-		Extra:                 extra,
-		ProxyID:               cloneAccountValuePointer(proxyID),
-		Concurrency:           source.Concurrency,
-		Priority:              source.Priority,
-		RateMultiplier:        cloneAccountValuePointer(source.RateMultiplier),
-		LoadFactor:            cloneAccountValuePointer(source.LoadFactor),
-		GroupIDs:              groupIDs,
-		ExpiresAt:             expiresAt,
-		AutoPauseOnExpired:    &autoPauseOnExpired,
-		SkipDefaultGroupBind:  true,
-		SkipMixedChannelCheck: true,
+		Name:                   duplicateAccountName(source.Name),
+		Notes:                  cloneAccountValuePointer(source.Notes),
+		Platform:               source.Platform,
+		Type:                   source.Type,
+		Credentials:            credentials,
+		Extra:                  extra,
+		ProxyID:                cloneAccountValuePointer(proxyID),
+		Concurrency:            source.Concurrency,
+		Priority:               source.Priority,
+		RateMultiplier:         cloneAccountValuePointer(source.RateMultiplier),
+		LoadFactor:             cloneAccountValuePointer(source.LoadFactor),
+		GroupIDs:               groupIDs,
+		ExpiresAt:              expiresAt,
+		AutoPauseOnExpired:     &autoPauseOnExpired,
+		CompressRequestEnabled: &compressRequestEnabled,
+		SkipDefaultGroupBind:   true,
+		SkipMixedChannelCheck:  true,
 	}
 	accountExtra, err := normalizeOpenAILongContextBillingExtra(input.Platform, input.Extra)
 	if err != nil {
@@ -462,6 +464,9 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 		account.AutoPauseOnExpired = *input.AutoPauseOnExpired
 	} else {
 		account.AutoPauseOnExpired = true
+	}
+	if input.CompressRequestEnabled != nil {
+		account.CompressRequestEnabled = *input.CompressRequestEnabled
 	}
 	if input.RateMultiplier != nil {
 		if *input.RateMultiplier < 0 {
@@ -842,6 +847,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	}
 	if input.AutoPauseOnExpired != nil {
 		account.AutoPauseOnExpired = *input.AutoPauseOnExpired
+	}
+	if input.CompressRequestEnabled != nil {
+		account.CompressRequestEnabled = *input.CompressRequestEnabled
 	}
 
 	// 先验证分组是否存在（在任何写操作之前）

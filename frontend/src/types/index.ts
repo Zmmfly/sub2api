@@ -1288,6 +1288,8 @@ export interface Account {
   last_used_at: string | null
   expires_at: number | null
   auto_pause_on_expired: boolean
+  // 开启后，该账号的出站请求体会按协商结果压缩（br/zstd/deflate）
+  compress_request_enabled: boolean
   created_at: string
   updated_at: string
   proxy?: Proxy
@@ -1562,6 +1564,7 @@ export interface CreateAccountRequest {
   group_ids?: number[]
   expires_at?: number | null
   auto_pause_on_expired?: boolean
+  compress_request_enabled?: boolean
   upstream_billing_probe_enabled?: boolean
   confirm_mixed_channel_risk?: boolean
 }
@@ -1582,6 +1585,7 @@ export interface UpdateAccountRequest {
   group_ids?: number[]
   expires_at?: number | null
   auto_pause_on_expired?: boolean
+  compress_request_enabled?: boolean
   upstream_billing_probe_enabled?: boolean
   upstream_billing_rate_sync_enabled?: boolean
   confirm_mixed_channel_risk?: boolean
@@ -1677,6 +1681,7 @@ export interface AdminDataAccount {
   rate_multiplier?: number | null
   expires_at?: number | null
   auto_pause_on_expired?: boolean
+  compress_request_enabled?: boolean
 }
 
 export interface AdminDataImportError {

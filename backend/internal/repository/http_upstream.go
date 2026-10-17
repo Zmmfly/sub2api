@@ -30,6 +30,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyutil"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/reqcompress"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
@@ -220,7 +221,7 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	// 执行请求
 	client := s.httpClientForUpstreamRequest(entry.client, req)
 	client = httpClientWithGrokAccessDeniedFallback(client)
-	resp, err := doUpstreamRequest(client, req)
+	resp, err := doUpstreamRequestWithCompression(client, req, accountID)
 	if err != nil {
 		s.recordOpenAIHTTP2Failure(profile, entry.protocolMode, entry.proxyKey, err)
 		// 请求失败，立即减少计数
@@ -281,7 +282,7 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 
 	client := s.httpClientForUpstreamRequest(entry.client, req)
 	client = httpClientWithGrokAccessDeniedFallback(client)
-	resp, err := doUpstreamRequest(client, req)
+	resp, err := doUpstreamRequestWithCompression(client, req, accountID)
 	if err != nil {
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
@@ -295,6 +296,20 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	})
 
 	return resp, nil
+}
+
+// doUpstreamRequestWithCompression applies the account's opted-in request
+// content coding before the caller sends anything. Every attempt, including a
+// rejected coding and the final identity fallback, is a separate
+// traffic-instrumented request, matching the existing retry measurement
+// semantics.
+func doUpstreamRequestWithCompression(client *http.Client, req *http.Request, accountID int64) (*http.Response, error) {
+	if req == nil || !reqcompress.Enabled(accountID) {
+		return doUpstreamRequest(client, req)
+	}
+	return reqcompress.Execute(accountID, req, func(attempt *http.Request) (*http.Response, error) {
+		return doUpstreamRequest(client, attempt)
+	})
 }
 
 // doUpstreamRequest owns cancellation for one attempt, without cancelling the

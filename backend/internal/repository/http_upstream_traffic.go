@@ -55,7 +55,19 @@ func (t *trafficUpstreamTransport) RoundTrip(request *http.Request) (*http.Respo
 		req.Header.Set("Accept-Encoding", "gzip")
 	}
 	compressed := traffic.IsCompressed(traffic.ContentEncoding(req.Header))
-	current := collector.Begin(traffic.UpstreamRequest, compressed)
+	originalBytes, hasOriginalBytes := traffic.OriginalRequestBodyBytes(req.Context())
+	beginRequest := func() *traffic.Counter {
+		counter := collector.Begin(traffic.UpstreamRequest, compressed)
+		if compressed && hasOriginalBytes {
+			// The sender compressed the body and knows its pre-coding size; publish
+			// it so the pair has a meaningful ratio instead of an unpaired actual
+			// size. Every transport-level replay gets its own counter and needs the
+			// same original size.
+			counter.SetOriginal(originalBytes)
+		}
+		return counter
+	}
+	current := beginRequest()
 	currentResponse := collector.Begin(traffic.UpstreamResponse, false)
 	written := make(map[*traffic.Counter]bool)
 	var mu sync.Mutex
@@ -77,7 +89,7 @@ func (t *trafficUpstreamTransport) RoundTrip(request *http.Request) (*http.Respo
 				return nil, err
 			}
 			mu.Lock()
-			current = collector.Begin(traffic.UpstreamRequest, compressed)
+			current = beginRequest()
 			currentResponse = collector.Begin(traffic.UpstreamResponse, false)
 			counter := current
 			mu.Unlock()

@@ -43,8 +43,11 @@ type Account struct {
 	LastUsedAt         *time.Time
 	ExpiresAt          *time.Time
 	AutoPauseOnExpired bool
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	// CompressRequestEnabled 表示是否压缩该账号的出站请求体。
+	// 可用的 Content-Encoding 由网关在运行时协商，不随账号持久化。
+	CompressRequestEnabled bool
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 
 	Schedulable bool
 

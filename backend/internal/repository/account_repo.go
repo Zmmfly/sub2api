@@ -27,6 +27,7 @@ import (
 	dbproxy "github.com/Wei-Shaw/sub2api/ent/proxy"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/reqcompress"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/lib/pq"
 
@@ -151,7 +152,8 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 		SetStatus(account.Status).
 		SetErrorMessage(account.ErrorMessage).
 		SetSchedulable(account.Schedulable).
-		SetAutoPauseOnExpired(account.AutoPauseOnExpired)
+		SetAutoPauseOnExpired(account.AutoPauseOnExpired).
+		SetCompressRequestEnabled(account.CompressRequestEnabled)
 
 	if account.RateMultiplier != nil {
 		builder.SetRateMultiplier(*account.RateMultiplier)
@@ -201,6 +203,10 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 	account.ID = created.ID
 	account.CreatedAt = created.CreatedAt
 	account.UpdatedAt = created.UpdatedAt
+	// Keep the process-lifetime compression registry in step with the row that
+	// was just written, so an enabled account can compress its next request
+	// without waiting for a read to refresh the registry.
+	reqcompress.SyncAccount(created.ID, created.CompressRequestEnabled, created.UpdatedAt)
 	return nil
 }
 
@@ -510,6 +516,11 @@ func (r *accountRepository) updateAccount(
 	// 否则网关在 outbox worker 延迟或异常时仍可能读到旧配置。
 	if contextTx == nil {
 		r.syncSchedulerAccountSnapshot(baseCtx, account.ID)
+		// The switch may have changed in this edit; mirror it before the response
+		// returns so the very next request observes the new setting. A
+		// caller-owned transaction is excluded because it may still roll back
+		// after this point; the following read then refreshes the registry.
+		reqcompress.SyncAccount(updated.ID, updated.CompressRequestEnabled, updated.UpdatedAt)
 	}
 	return nil
 }
@@ -545,7 +556,8 @@ func (r *accountRepository) updateLockedAccount(
 		SetStatus(account.Status).
 		SetErrorMessage(account.ErrorMessage).
 		SetSchedulable(schedulable).
-		SetAutoPauseOnExpired(account.AutoPauseOnExpired)
+		SetAutoPauseOnExpired(account.AutoPauseOnExpired).
+		SetCompressRequestEnabled(account.CompressRequestEnabled)
 
 	if explicitRateMultiplier != nil {
 		builder.SetRateMultiplier(*explicitRateMultiplier)
@@ -3619,7 +3631,7 @@ func accountEntityToService(m *dbent.Account) *service.Account {
 
 	rateMultiplier := m.RateMultiplier
 
-	return &service.Account{
+	account := &service.Account{
 		ID:                      m.ID,
 		Name:                    m.Name,
 		Notes:                   m.Notes,
@@ -3638,6 +3650,7 @@ func accountEntityToService(m *dbent.Account) *service.Account {
 		LastUsedAt:              m.LastUsedAt,
 		ExpiresAt:               m.ExpiresAt,
 		AutoPauseOnExpired:      m.AutoPauseOnExpired,
+		CompressRequestEnabled:  m.CompressRequestEnabled,
 		CreatedAt:               m.CreatedAt,
 		UpdatedAt:               m.UpdatedAt,
 		Schedulable:             m.Schedulable,
@@ -3652,6 +3665,11 @@ func accountEntityToService(m *dbent.Account) *service.Account {
 		ParentAccountID:         m.ParentAccountID,
 		QuotaDimension:          string(m.QuotaDimension),
 	}
+	// Every database read refreshes the process-lifetime compression registry.
+	// The row's updated_at orders this observation against concurrent admin
+	// edits and lagging scheduler-cache payloads.
+	reqcompress.SyncAccount(account.ID, account.CompressRequestEnabled, account.UpdatedAt)
+	return account
 }
 
 func normalizeJSONMap(in map[string]any) map[string]any {

@@ -13,6 +13,7 @@
 package reqcompress
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -51,23 +52,33 @@ func (r *Registry) Sync(accountID int64, enabled bool, updatedAt time.Time) {
 		return
 	}
 	slot.mu.Lock()
-	defer slot.mu.Unlock()
-
 	if !updatedAt.IsZero() {
 		if !slot.syncedAt.IsZero() && updatedAt.Before(slot.syncedAt) {
+			slot.mu.Unlock()
 			return
 		}
 		slot.syncedAt = updatedAt
 	}
+	transition := ""
 	if enabled {
 		if slot.state == nil {
 			slot.state = newState()
+			transition = "enabled"
 		}
-		return
+	} else if slot.state != nil {
+		// Dropping the state makes a later re-enable probe again: the upstream
+		// may have changed while compression was off.
+		slot.state = nil
+		transition = "disabled"
 	}
-	// Dropping the state makes a later re-enable probe again: the upstream may
-	// have changed while compression was off.
-	slot.state = nil
+	slot.mu.Unlock()
+
+	switch transition {
+	case "enabled":
+		slog.Debug("reqcompress switch enabled", "account_id", accountID)
+	case "disabled":
+		slog.Info("reqcompress switch disabled", "account_id", accountID)
+	}
 }
 
 // Enabled reports whether accountID is currently opted in.

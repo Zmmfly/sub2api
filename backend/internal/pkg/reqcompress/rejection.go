@@ -45,6 +45,29 @@ var rejectionKeywords = []string{
 	"deflate",
 }
 
+// shouldRetryIdentity reports whether a non-success response is ambiguous enough
+// that an identity attempt should be tried. Clear auth/routing/rate signals are
+// excluded: identity cannot change them and a second attempt only adds load.
+// 403 stays eligible because WAF/CDN layers commonly answer a body they cannot
+// inspect with a generic "rejected request".
+func shouldRetryIdentity(resp *http.Response) bool {
+	if resp == nil || resp.StatusCode < 400 {
+		return false
+	}
+	switch resp.StatusCode {
+	case http.StatusUnauthorized,
+		http.StatusNotFound,
+		http.StatusMethodNotAllowed,
+		http.StatusProxyAuthRequired,
+		http.StatusRequestTimeout,
+		http.StatusTooManyRequests:
+		return false
+	case 529: // Anthropic "overloaded"
+		return false
+	}
+	return true
+}
+
 // isEncodingRejection consumes and inspects a small error body and reports
 // whether the upstream rejected the request because of its Content-Encoding.
 // The body is always restored for the caller; a rejected attempt is closed by

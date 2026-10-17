@@ -1,6 +1,9 @@
 package reqcompress
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // state holds the process-lifetime negotiation result for one opted-in account.
 // A zero-value state has not been negotiated yet and starts with TrialOrder.
@@ -19,6 +22,9 @@ type state struct {
 	// negotiating is true while one request owns the trial. Concurrent
 	// requests forward identity instead of racing the upstream.
 	negotiating bool
+	// lastFallbackLog rate-limits warning-level fallback logs so a persistent
+	// upstream outage cannot flood the log while Debug still records each event.
+	lastFallbackLog time.Time
 }
 
 func newState() *state {
@@ -74,6 +80,19 @@ func (s *state) negotiationCandidateFailed(algorithm Algorithm) {
 	}
 }
 
+// claimFallbackLog returns true at most once per minute for one account, so a
+// persistent failure cannot flood the warning log.
+func (s *state) claimFallbackLog(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.lastFallbackLog.IsZero() && now.Sub(s.lastFallbackLog) < time.Minute {
+		return false
+	}
+	s.lastFallbackLog = now
+	return true
+}
+
 // abortNegotiation releases the trial after a transport error. The result is
 // unknown, so the next request probes again instead of pinning identity.
 func (s *state) abortNegotiation() {
@@ -81,6 +100,20 @@ func (s *state) abortNegotiation() {
 	defer s.mu.Unlock()
 
 	s.negotiating = false
+}
+
+// pinIdentity stops compression for the process lifetime. It is used when a
+// coded attempt failed and the identity fallback could not prove the coding was
+// safe, so the account must stay usable without compression until the switch is
+// toggled again or the process restarts.
+func (s *state) pinIdentity() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.current = AlgorithmNone
+	s.tested = true
+	s.negotiating = false
+	s.remaining = nil
 }
 
 // retireSettled handles an upstream that stopped accepting the settled coding.

@@ -220,42 +220,124 @@ func TestExecuteRenegotiatesAfterSettledCodingBreaks(t *testing.T) {
 	require.Equal(t, []string{"zstd"}, seen)
 }
 
-func TestExecuteTreatsUnrelatedErrorsAsUnproven(t *testing.T) {
+func TestExecuteFallsBackToIdentityOnAmbiguousError(t *testing.T) {
 	body := testBody()
 	registry := NewRegistry()
 	registry.Sync(4, true, time.Time{})
 
 	var sent []string
 	resp, err := registry.Execute(4, newTestRequest(t, body), func(req *http.Request) (*http.Response, error) {
-		sent = append(sent, req.Header.Get("Content-Encoding"))
+		encoding := req.Header.Get("Content-Encoding")
+		sent = append(sent, encoding)
+		if encoding == "" {
+			return okResponse("identity"), nil
+		}
+		require.Equal(t, "br", encoding, "the coded attempt must advertise Content-Encoding")
 		return &http.Response{
-			StatusCode: http.StatusBadRequest,
-			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"messages: invalid role"}}`)),
+			StatusCode: http.StatusForbidden,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"rejected request"}`)),
 		}, nil
 	})
 	require.NoError(t, err)
-	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.Equal(t, []string{"br"}, sent)
-	require.Equal(t, "messages: invalid role", errorMessage(t, resp.Body))
-
-	// The unrelated failure must not pin brotli: the next request probes again.
-	sent = nil
-	resp, err = registry.Execute(4, newTestRequest(t, body), func(req *http.Request) (*http.Response, error) {
-		sent = append(sent, req.Header.Get("Content-Encoding"))
-		return okResponse("ok"), nil
-	})
-	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Equal(t, []string{"br"}, sent)
+	require.Equal(t, "identity", readAll(t, resp.Body))
+	require.Equal(t, []string{"br", ""}, sent)
 
-	// A success settles the coding for subsequent requests.
+	// A successful identity fallback pins identity for the process lifetime.
 	sent = nil
 	_, err = registry.Execute(4, newTestRequest(t, body), func(req *http.Request) (*http.Response, error) {
 		sent = append(sent, req.Header.Get("Content-Encoding"))
 		return okResponse("ok"), nil
 	})
 	require.NoError(t, err)
+	require.Equal(t, []string{""}, sent)
+}
+
+func TestExecutePinsIdentityWhenFallbackAlsoFails(t *testing.T) {
+	body := testBody()
+	registry := NewRegistry()
+	registry.Sync(13, true, time.Time{})
+
+	var sent []string
+	send := func(req *http.Request) (*http.Response, error) {
+		sent = append(sent, req.Header.Get("Content-Encoding"))
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"messages: invalid role"}}`)),
+		}, nil
+	}
+	resp, err := registry.Execute(13, newTestRequest(t, body), send)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Equal(t, "messages: invalid role", errorMessage(t, resp.Body))
+	require.Equal(t, []string{"br", ""}, sent)
+
+	// The trial must not keep probing on every request after the fallback also
+	// failed; identity is pinned and the error is returned directly.
+	sent = nil
+	resp, err = registry.Execute(13, newTestRequest(t, body), send)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Equal(t, []string{""}, sent)
+}
+
+func TestExecuteDoesNotFallbackOnRateLimit(t *testing.T) {
+	body := testBody()
+	registry := NewRegistry()
+	registry.Sync(14, true, time.Time{})
+
+	var sent []string
+	send := func(req *http.Request) (*http.Response, error) {
+		sent = append(sent, req.Header.Get("Content-Encoding"))
+		return &http.Response{StatusCode: http.StatusTooManyRequests, Body: http.NoBody}, nil
+	}
+	resp, err := registry.Execute(14, newTestRequest(t, body), send)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
 	require.Equal(t, []string{"br"}, sent)
+
+	// The trial stays open; the next request probes again.
+	sent = nil
+	_, err = registry.Execute(14, newTestRequest(t, body), send)
+	require.NoError(t, err)
+	require.Equal(t, []string{"br"}, sent)
+}
+
+func TestExecuteSettledCodingFallsBackToIdentity(t *testing.T) {
+	body := testBody()
+	registry := NewRegistry()
+	registry.Sync(15, true, time.Time{})
+
+	// Settle on brotli first.
+	_, err := registry.Execute(15, newTestRequest(t, body), func(req *http.Request) (*http.Response, error) {
+		return okResponse("ok"), nil
+	})
+	require.NoError(t, err)
+
+	var sent []string
+	resp, err := registry.Execute(15, newTestRequest(t, body), func(req *http.Request) (*http.Response, error) {
+		encoding := req.Header.Get("Content-Encoding")
+		sent = append(sent, encoding)
+		if encoding == "br" {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Body:       io.NopCloser(strings.NewReader(`{"error":"rejected request"}`)),
+			}, nil
+		}
+		return okResponse("identity"), nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, []string{"br", ""}, sent)
+
+	// Identity succeeded where the coding failed, so compression is pinned off.
+	sent = nil
+	_, err = registry.Execute(15, newTestRequest(t, body), func(req *http.Request) (*http.Response, error) {
+		sent = append(sent, req.Header.Get("Content-Encoding"))
+		return okResponse("ok"), nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{""}, sent)
 }
 
 func TestExecuteTreatsEmptyUnsupportedMediaTypeAsRejection(t *testing.T) {

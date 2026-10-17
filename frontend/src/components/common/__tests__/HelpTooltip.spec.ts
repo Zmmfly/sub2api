@@ -81,6 +81,82 @@ describe('HelpTooltip', () => {
     wrapper.unmount()
   })
 
+  it('opens on keyboard focus, describes the trigger and stays open on mouse leave until focus leaves', async () => {
+    const wrapper = mount(HelpTooltip, {
+      attachTo: document.body,
+      attrs: { tabindex: 0 },
+      props: { content: 'keyboard details' },
+    })
+    const trigger = wrapper.get('.group')
+    const element = trigger.element as HTMLElement
+    const tooltip = getTooltipElement()
+
+    element.focus()
+    await nextTick()
+    expect(tooltip.style.display).not.toBe('none')
+    expect(trigger.attributes('aria-describedby')).toBe(tooltip.id)
+    expect(tooltip.id).not.toBe('')
+
+    await trigger.trigger('mouseenter')
+    await trigger.trigger('mouseleave')
+    expect(tooltip.style.display).not.toBe('none')
+
+    element.blur()
+    await nextTick()
+    expect(tooltip.style.display).toBe('none')
+    expect(trigger.attributes('aria-describedby')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('keeps hovered details open when focus leaves and supports Escape dismissal', async () => {
+    const wrapper = mount(HelpTooltip, {
+      attachTo: document.body,
+      attrs: { tabindex: 0 },
+      props: { content: 'hover and focus details' },
+    })
+    const trigger = wrapper.get('.group')
+    const element = trigger.element as HTMLElement
+    const tooltip = getTooltipElement()
+
+    await trigger.trigger('mouseenter')
+    element.focus()
+    element.blur()
+    await nextTick()
+    expect(tooltip.style.display).not.toBe('none')
+    await trigger.trigger('mouseleave')
+    expect(tooltip.style.display).toBe('none')
+
+    element.focus()
+    await nextTick()
+    expect(tooltip.style.display).not.toBe('none')
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await nextTick()
+    expect(tooltip.style.display).toBe('none')
+    wrapper.unmount()
+  })
+
+  it('does not change click-only tooltips into focus or hover tooltips', async () => {
+    const wrapper = mount(HelpTooltip, {
+      attachTo: document.body,
+      attrs: { tabindex: 0 },
+      props: { content: 'click-only details', trigger: 'click' },
+    })
+    const trigger = wrapper.get('.group')
+    const element = trigger.element as HTMLElement
+    const tooltip = getTooltipElement()
+
+    element.focus()
+    await nextTick()
+    await trigger.trigger('mouseenter')
+    expect(tooltip.style.display).toBe('none')
+    await trigger.trigger('click')
+    expect(tooltip.style.display).not.toBe('none')
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await nextTick()
+    expect(tooltip.style.display).toBe('none')
+    wrapper.unmount()
+  })
+
   it('keeps a hover tooltip open while the pointer moves between the trigger and the tooltip', async () => {
     const wrapper = mount(HelpTooltip, {
       attachTo: document.body,

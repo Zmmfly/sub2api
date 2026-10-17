@@ -17,6 +17,8 @@ export default {
         response: '响应',
         breakdownHelp: '请求与响应流量拆分',
         compression: '压缩率',
+        bandwidth: '等效带宽',
+        bandwidthHint: '等效带宽 = 该项已统计正文流量（字节）× 8 ÷ 统计时长（秒），按十进制带宽单位显示（1 Mbps = 1,000,000 bit/s）。仅根据已统计的请求与响应正文流量计算，不含 HTTP 头、分帧及 TCP/TLS 等开销；部分覆盖不外推。表示统计时段内的平均值，并非实时或峰值带宽。',
         coverage: '已采集 {count}/{total} 个正文',
         directionCoverage: '已采集 {count}/{total} 个请求',
         pairedCoverage: '双值完整 {count}/{total} 个正文',

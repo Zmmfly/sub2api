@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatTrafficBytes, formatTrafficCompressionRate } from '../traffic'
+import { formatTrafficBandwidth, formatTrafficBytes, formatTrafficCompressionRate } from '../traffic'
 
 describe('formatTrafficBytes', () => {
   it.each([
@@ -26,6 +26,45 @@ describe('formatTrafficBytes', () => {
     [Number.MAX_SAFE_INTEGER, '8 PiB'],
   ])('formats %s as %s', (bytes, expected) => {
     expect(formatTrafficBytes(bytes)).toBe(expected)
+  })
+})
+
+describe('formatTrafficBandwidth', () => {
+  it.each([
+    [0, 60, '0 bps'],
+    [-0, 60, '0 bps'],
+    [1, 1, '8 bps'],
+    [1, 1000, '< 0.01 bps'],
+    [125, 1, '1 kbps'],
+    [125_000, 1, '1 Mbps'],
+    [187_500, 1, '1.5 Mbps'],
+    [125_000_000, 1, '1 Gbps'],
+    [125_000_000_000, 1, '1 Tbps'],
+    [125_000_000_000_000, 1, '1 Pbps'],
+    [125_000_000_000_000_000, 1, '1 Ebps'],
+    [125_000 * 60, 60, '1 Mbps'],
+    [125_000 * 3600, 3600, '1 Mbps'],
+    [125_000 * 86400, 86400, '1 Mbps'],
+    [125_000, 0.5, '2 Mbps'],
+    [1024, 1, '8.19 kbps'],
+    [124_999.9, 1, '1 Mbps'],
+    [undefined, 60, '—'],
+    [null, 60, '—'],
+    [NaN, 60, '—'],
+    [Infinity, 60, '—'],
+    [-Infinity, 60, '—'],
+    [-1, 60, '—'],
+    [1024, undefined, '—'],
+    [1024, null, '—'],
+    [1024, 0, '—'],
+    [0, 0, '—'],
+    [1024, -1, '—'],
+    [1024, NaN, '—'],
+    [1024, Infinity, '—'],
+    [1024, -Infinity, '—'],
+    [Number.MAX_VALUE, Number.MIN_VALUE, '—'],
+  ])('formats %s bytes over %s seconds as %s', (bytes, seconds, expected) => {
+    expect(formatTrafficBandwidth(bytes, seconds)).toBe(expected)
   })
 })
 

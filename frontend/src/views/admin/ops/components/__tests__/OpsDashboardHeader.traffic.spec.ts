@@ -19,7 +19,11 @@ const traffic: OpsTrafficSummary = {
   upstream: { original_bytes: 2048, actual_bytes: 1024, original_sample_count: 4, actual_sample_count: 4, paired_sample_count: 4, compression_percent: 50 },
   downstream: { original_bytes: null, actual_bytes: null, original_sample_count: 0, actual_sample_count: 0, paired_sample_count: 0, compression_percent: null }
 }
-const overview = { tps: { avg: 242.7 }, request_count_total: 99, traffic } as OpsDashboardOverview
+const overview = {
+  start_time: '2026-06-01T00:00:00Z',
+  end_time: '2026-06-01T01:00:00Z',
+  tps: { avg: 242.7 }, request_count_total: 99, traffic
+} as OpsDashboardOverview
 const HelpTooltipStub = { template: '<span><slot name="trigger" /></span>' }
 
 function mountHeader() {
@@ -35,6 +39,8 @@ describe('OpsDashboardHeader traffic integration', () => {
     await flushPromises()
     const cards = wrapper.getComponent(OpsTrafficCards)
     expect(cards.props('traffic')).toEqual(traffic)
+    expect(cards.props('startTime')).toBe(overview.start_time)
+    expect(cards.props('endTime')).toBe(overview.end_time)
     expect(cards.findAll('article')).toHaveLength(2)
 
     const tps = wrapper.get('[data-testid="output-tps-card"]')
@@ -57,6 +63,24 @@ describe('OpsDashboardHeader traffic integration', () => {
     expect(cards.props('traffic')?.request_count).not.toBe(overview.request_count_total)
   })
 
+  it('calculates bandwidth from the returned overview times, not the toolbar or realtime window', async () => {
+    const wrapper = mountHeader()
+    await flushPromises()
+    // Toolbar is 6h and realtime defaults to 1min, but the returned overview covers 1h.
+    expect(wrapper.get('[data-testid="traffic-upstream-original-bandwidth"]').text()).toBe('4.55 bps')
+    expect(wrapper.get('[data-testid="traffic-upstream-actual-bandwidth"]').text()).toBe('2.28 bps')
+    expect(wrapper.get('[data-testid="traffic-downstream-actual-bandwidth"]').text()).toBe('—')
+
+    await wrapper.setProps({
+      timeRange: 'custom',
+      customStartTime: '2026-06-01T00:00:00Z',
+      customEndTime: '2026-06-01T00:10:00Z',
+      overview: { ...overview, end_time: '2026-06-01T00:30:00Z' }
+    })
+    expect(wrapper.get('[data-testid="traffic-upstream-original-bandwidth"]').text()).toBe('9.1 bps')
+    expect(wrapper.get('[data-testid="traffic-upstream-actual-bandwidth"]').text()).toBe('4.55 bps')
+  })
+
   it('reacts to the existing overview/loading props without an independent fetch, including fullscreen', async () => {
     const wrapper = mountHeader()
     await flushPromises()
@@ -64,12 +88,14 @@ describe('OpsDashboardHeader traffic integration', () => {
     await wrapper.setProps({ loading: true, fullscreen: true })
     expect(wrapper.getComponent(OpsTrafficCards).props('loading')).toBe(true)
     expect(wrapper.find('[data-testid="traffic-upstream-original"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="traffic-upstream-original-bandwidth"]').exists()).toBe(false)
 
     const nextTraffic = { ...traffic, upstream: { ...traffic.upstream, actual_bytes: 512, compression_percent: 75 } }
     await wrapper.setProps({ loading: false, overview: { ...overview, traffic: nextTraffic } })
     await flushPromises()
     expect(wrapper.get('[data-testid="traffic-upstream-actual"]').text()).toBe('512 B')
     expect(wrapper.get('[data-testid="traffic-upstream-compression"]').text()).toBe('75.0%')
+    expect(wrapper.get('[data-testid="traffic-upstream-actual-bandwidth"]').text()).toBe('1.14 bps')
     expect(opsAPI.getRealtimeTrafficSummary).not.toHaveBeenCalled()
 
     await wrapper.setProps({ overview: { ...overview, traffic: undefined } })

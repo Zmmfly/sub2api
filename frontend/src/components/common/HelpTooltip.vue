@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, useTemplateRef, nextTick } from 'vue'
+import { onBeforeUnmount, onMounted, ref, useId, useTemplateRef, nextTick } from 'vue'
 
 const props = withDefaults(defineProps<{
   content?: string
@@ -11,6 +11,9 @@ const props = withDefaults(defineProps<{
 })
 
 const show = ref(false)
+const tooltipId = useId()
+let pointerInside = false
+let focusInside = false
 const triggerRef = useTemplateRef<HTMLElement>('trigger')
 const tooltipRef = useTemplateRef<HTMLElement>('tooltip')
 const contentRef = useTemplateRef<HTMLElement>('content')
@@ -31,6 +34,7 @@ function closeTooltip() {
 
 function onEnter() {
   if (props.trigger !== 'hover') return
+  pointerInside = true
   openTooltip()
 }
 
@@ -42,13 +46,28 @@ function isInside(container: HTMLElement | null, target: EventTarget | null): bo
 function onLeave(event: MouseEvent) {
   if (props.trigger !== 'hover') return
   if (isInside(tooltipRef.value, event.relatedTarget)) return
-  closeTooltip()
+  pointerInside = false
+  if (!focusInside) closeTooltip()
 }
 
 function onTooltipLeave(event: MouseEvent) {
   if (props.trigger !== 'hover') return
   if (isInside(triggerRef.value, event.relatedTarget)) return
-  closeTooltip()
+  pointerInside = false
+  if (!focusInside) closeTooltip()
+}
+
+function onFocusIn() {
+  if (props.trigger !== 'hover') return
+  focusInside = true
+  openTooltip()
+}
+
+function onFocusOut(event: FocusEvent) {
+  if (props.trigger !== 'hover') return
+  if (isInside(triggerRef.value, event.relatedTarget) || isInside(tooltipRef.value, event.relatedTarget)) return
+  focusInside = false
+  if (!pointerInside) closeTooltip()
 }
 
 function onClick(event: MouseEvent) {
@@ -70,7 +89,6 @@ function onDocumentClick(event: MouseEvent) {
 }
 
 function onDocumentKeydown(event: KeyboardEvent) {
-  if (props.trigger !== 'click') return
   if (event.key === 'Escape') {
     closeTooltip()
   }
@@ -133,8 +151,11 @@ onBeforeUnmount(() => {
   <div
     ref="trigger"
     class="group relative ml-1 inline-flex items-center align-middle"
+    :aria-describedby="show ? tooltipId : undefined"
     @mouseenter="onEnter"
     @mouseleave="onLeave"
+    @focusin="onFocusIn"
+    @focusout="onFocusOut"
     @click="onClick"
   >
     <!-- Trigger Icon -->
@@ -158,6 +179,7 @@ onBeforeUnmount(() => {
     <Teleport to="body">
       <!-- before: 伪元素沿当前放置方向延伸，盖住提示框与触发图标之间的空隙，让指针能连续移入提示框。 -->
       <div
+        :id="tooltipId"
         ref="tooltip"
         v-show="show"
         role="tooltip"
@@ -169,7 +191,10 @@ onBeforeUnmount(() => {
             : '-translate-x-1/2 before:bottom-full',
         ]"
         :style="{ top: tooltipStyle.top, left: tooltipStyle.left }"
+        @mouseenter="onEnter"
         @mouseleave="onTooltipLeave"
+        @focusin="onFocusIn"
+        @focusout="onFocusOut"
       >
         <button
           v-if="props.trigger === 'click'"

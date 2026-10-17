@@ -17,6 +17,8 @@ export default {
         response: 'Response',
         breakdownHelp: 'Request/response traffic breakdown',
         compression: 'Compression rate',
+        bandwidth: 'Equivalent bandwidth',
+        bandwidthHint: 'Equivalent bandwidth = recorded body bytes for this metric × 8 ÷ statistics window in seconds, using decimal bandwidth units (1 Mbps = 1,000,000 bit/s). Calculated only from recorded request and response bodies; excludes HTTP headers, framing and TCP/TLS overhead. Partial coverage is not extrapolated. This is a window average, not real-time or peak bandwidth.',
         coverage: 'Measured {count}/{total} bodies',
         directionCoverage: 'Measured {count}/{total} requests',
         pairedCoverage: 'Paired {count}/{total} bodies',

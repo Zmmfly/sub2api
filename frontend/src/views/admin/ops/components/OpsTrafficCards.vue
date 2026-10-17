@@ -3,14 +3,22 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import type { OpsTrafficLink, OpsTrafficSummary } from '@/api/admin/ops'
-import { formatTrafficBytes } from '@/utils/traffic'
+import { formatTrafficBandwidth, formatTrafficBytes } from '@/utils/traffic'
 
 const props = withDefaults(defineProps<{
   traffic?: OpsTrafficSummary | null
+  startTime?: string | null
+  endTime?: string | null
   loading?: boolean
-}>(), { traffic: null, loading: false })
+}>(), { traffic: null, startTime: null, endTime: null, loading: false })
 
 const { t } = useI18n()
+
+// Use the returned overview window, not the toolbar selection or refresh cadence.
+const durationSeconds = computed(() => {
+  if (!props.startTime || !props.endTime) return null
+  return (Date.parse(props.endTime) - Date.parse(props.startTime)) / 1000
+})
 
 const sides = computed(() => [
   { key: 'upstream', summary: props.traffic?.upstream, order: 8 },
@@ -191,6 +199,24 @@ function compressionLabel(summary: OpsTrafficLink | undefined): string {
                   >{{ directionCoverageText(side.summary?.[direction]?.[metric.count]) }}</p>
                 </div>
               </div>
+            </HelpTooltip>
+            <HelpTooltip
+              class="!ml-0 min-w-0 cursor-help rounded text-xs text-gray-500 outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:text-gray-400"
+              tabindex="0"
+              width-class="w-80 max-w-[calc(100vw-2rem)]"
+              :aria-label="`${t('admin.ops.traffic.bandwidth')} ${formatTrafficBandwidth(side.summary?.[metric.bytes], durationSeconds)}`"
+              :data-testid="`traffic-${side.key}-${metric.key}-bandwidth-tooltip`"
+            >
+              <template #trigger>
+                <span class="inline-flex flex-wrap items-baseline gap-x-1">
+                  <span>{{ t('admin.ops.traffic.bandwidth') }}</span>
+                  <span
+                    class="whitespace-nowrap font-semibold tabular-nums"
+                    :data-testid="`traffic-${side.key}-${metric.key}-bandwidth`"
+                  >{{ formatTrafficBandwidth(side.summary?.[metric.bytes], durationSeconds) }}</span>
+                </span>
+              </template>
+              <p :data-testid="`traffic-${side.key}-${metric.key}-bandwidth-hint`">{{ t('admin.ops.traffic.bandwidthHint') }}</p>
             </HelpTooltip>
             <span
               v-if="metric.key === 'actual'"

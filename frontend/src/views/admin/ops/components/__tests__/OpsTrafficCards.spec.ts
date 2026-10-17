@@ -56,8 +56,11 @@ const unknownLink = (): OpsTrafficLink => link({
   response: null
 })
 
+const startTime = '2026-06-01T00:00:00Z'
+const endTime = '2026-06-01T00:01:00Z'
+
 function mountCards(value?: OpsTrafficSummary | null, loading = false) {
-  return mount(OpsTrafficCards, { props: { traffic: value, loading } })
+  return mount(OpsTrafficCards, { attachTo: document.body, props: { traffic: value, startTime, endTime, loading } })
 }
 
 describe('OpsTrafficCards', () => {
@@ -89,6 +92,93 @@ describe('OpsTrafficCards', () => {
     expect(wrapper.get('[data-testid="traffic-upstream-coverage-tooltip"] svg').exists()).toBe(true)
     expect(bodyTestId('traffic-upstream-scope').textContent).toBe('admin.ops.traffic.scope')
     expect(bodyTestId('traffic-upstream-compression-hint').textContent).toBe('admin.ops.traffic.compressionHint')
+  })
+
+  it('puts equivalent bandwidth after each byte total without replacing the actual compression rate', () => {
+    const wrapper = mountCards(traffic({
+      upstream: link({ original_bytes: 7_500_000, actual_bytes: 3_750_000 }),
+      downstream: link({ original_bytes: 15_000_000, actual_bytes: 18_750_000, compression_percent: -25 })
+    }))
+    for (const [side, metric, expected] of [
+      ['upstream', 'original', '1 Mbps'],
+      ['upstream', 'actual', '500 kbps'],
+      ['downstream', 'original', '2 Mbps'],
+      ['downstream', 'actual', '2.5 Mbps']
+    ]) {
+      const row = wrapper.get(`[data-testid="traffic-${side}-${metric}-row"]`)
+      const bandwidth = row.get(`[data-testid="traffic-${side}-${metric}-bandwidth"]`)
+      expect(bandwidth.text()).toBe(expected)
+      expect(row.html().indexOf(`data-testid="traffic-${side}-${metric}-bandwidth"`)).toBeGreaterThan(row.html().indexOf(`data-testid="traffic-${side}-${metric}"`))
+    }
+    expect(wrapper.get('[data-testid="traffic-upstream-compression"]').text()).toBe('50.0%')
+    expect(wrapper.get('[data-testid="traffic-downstream-compression"]').text()).toBe('-25.0%')
+  })
+
+  it('updates bandwidth with the returned statistics window and traffic, without extrapolating partial coverage', async () => {
+    const wrapper = mountCards(traffic({
+      upstream: link({ original_bytes: 7_500_000, actual_bytes: 3_750_000, original_sample_count: 1, actual_sample_count: 1 })
+    }))
+    expect(wrapper.get('[data-testid="traffic-upstream-original-bandwidth"]').text()).toBe('1 Mbps')
+    expect(wrapper.get('[data-testid="traffic-upstream-coverage-state"]').text()).toBe('admin.ops.traffic.partial')
+    await wrapper.setProps({ startTime: '2026-06-01T08:00:00+08:00', endTime: '2026-06-01T08:02:30+08:00' })
+    expect(wrapper.get('[data-testid="traffic-upstream-original-bandwidth"]').text()).toBe('400 kbps')
+    expect(wrapper.get('[data-testid="traffic-upstream-actual-bandwidth"]').text()).toBe('200 kbps')
+    await wrapper.setProps({ traffic: traffic({ upstream: link({ original_bytes: 15_000_000, actual_bytes: null }) }) })
+    expect(wrapper.get('[data-testid="traffic-upstream-original-bandwidth"]').text()).toBe('800 kbps')
+    expect(wrapper.get('[data-testid="traffic-upstream-actual-bandwidth"]').text()).toBe('—')
+  })
+
+  it.each([
+    [undefined, endTime],
+    [startTime, undefined],
+    [null, endTime],
+    [startTime, null],
+    ['', endTime],
+    ['invalid', endTime],
+    [startTime, 'invalid'],
+    [startTime, startTime],
+    [endTime, startTime]
+  ])('keeps bandwidth unknown for a missing or invalid statistics window: %s / %s', async (startTime, endTime) => {
+    const wrapper = mountCards(traffic())
+    await wrapper.setProps({ startTime, endTime })
+    for (const side of ['upstream', 'downstream']) {
+      for (const metric of ['original', 'actual']) {
+        expect(wrapper.get(`[data-testid="traffic-${side}-${metric}-bandwidth"]`).text()).toBe('—')
+      }
+    }
+    expect(wrapper.get('[data-testid="traffic-upstream-original"]').text()).toBe('4 KiB')
+  })
+
+  it('explains the bandwidth basis on hover and keyboard focus for all four measurements', async () => {
+    const wrapper = mountCards(traffic())
+    const tooltipIds = new Set<string>()
+    for (const side of ['upstream', 'downstream']) {
+      for (const metric of ['original', 'actual']) {
+        const trigger = wrapper.get(`[data-testid="traffic-${side}-${metric}-bandwidth-tooltip"]`)
+        const element = trigger.element as HTMLElement
+        const tooltip = tooltipFor(`traffic-${side}-${metric}-bandwidth-hint`)
+        expect(trigger.attributes('tabindex')).toBe('0')
+        expect(trigger.attributes('aria-label')).toContain('admin.ops.traffic.bandwidth')
+        expect(tooltip.style.display).toBe('none')
+        expect(trigger.text()).not.toContain('admin.ops.traffic.bandwidthHint')
+
+        await trigger.trigger('mouseenter')
+        expect(tooltip.style.display).not.toBe('none')
+        expect(tooltip.textContent).toBe('admin.ops.traffic.bandwidthHint')
+        await trigger.trigger('mouseleave')
+        expect(tooltip.style.display).toBe('none')
+
+        element.focus()
+        await nextTick()
+        expect(tooltip.style.display).not.toBe('none')
+        expect(trigger.attributes('aria-describedby')).toBe(tooltip.id)
+        tooltipIds.add(tooltip.id)
+        element.blur()
+        await nextTick()
+        expect(tooltip.style.display).toBe('none')
+      }
+    }
+    expect(tooltipIds.size).toBe(4)
   })
 
   it('keeps long scope, formula and coverage details hidden until their help icons are hovered', async () => {
@@ -165,6 +255,9 @@ describe('OpsTrafficCards', () => {
         for (const metric of ['original', 'actual', 'compression']) {
           expect(wrapper.get(`[data-testid="traffic-${side}-${metric}"]`).text()).toBe('—')
         }
+        for (const metric of ['original', 'actual']) {
+          expect(wrapper.get(`[data-testid="traffic-${side}-${metric}-bandwidth"]`).text()).toBe('—')
+        }
         expect(wrapper.get(`[data-testid="traffic-${side}-coverage-state"]`).text()).toBe('admin.ops.traffic.unavailable')
         for (const direction of ['request', 'response']) {
           expect(bodyTestId(`traffic-${side}-${direction}-original`).textContent).toBe('—')
@@ -190,6 +283,10 @@ describe('OpsTrafficCards', () => {
     expect(wrapper.get('[data-testid="traffic-upstream-original"]').text()).toBe('0 B')
     expect(wrapper.get('[data-testid="traffic-upstream-actual"]').text()).toBe('0 B')
     expect(wrapper.get('[data-testid="traffic-upstream-compression"]').text()).toBe('—')
+    expect(wrapper.get('[data-testid="traffic-upstream-original-bandwidth"]').text()).toBe('0 bps')
+    expect(wrapper.get('[data-testid="traffic-upstream-actual-bandwidth"]').text()).toBe('0 bps')
+    expect(wrapper.get('[data-testid="traffic-downstream-original-bandwidth"]').text()).toBe('—')
+    expect(wrapper.get('[data-testid="traffic-downstream-actual-bandwidth"]').text()).toBe('0 bps')
     expect(bodyTestId('traffic-upstream-request-original').textContent).toBe('0 B')
     expect(bodyTestId('traffic-upstream-response-actual').textContent).toBe('0 B')
     expect(wrapper.get('[data-testid="traffic-downstream-original"]').text()).toBe('—')
@@ -240,6 +337,9 @@ describe('OpsTrafficCards', () => {
     expect(wrapper.get('[data-testid="traffic-downstream-card"]').attributes('aria-busy')).toBe('true')
     expect(wrapper.get('[role="status"]').text()).toBe('admin.ops.loadingText')
     expect(wrapper.find('[data-testid="traffic-upstream-original"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="traffic-upstream-original-bandwidth"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="traffic-upstream-actual-bandwidth"]').exists()).toBe(false)
+    expect(document.body.querySelector('[data-testid="traffic-upstream-original-bandwidth-hint"]')).toBeNull()
     expect(document.body.querySelector('[data-testid="traffic-upstream-original-coverage"]')).toBeNull()
     expect(document.body.querySelector('[data-testid="traffic-upstream-request-original"]')).toBeNull()
     expect(wrapper.find('[data-testid="traffic-upstream-compression"]').exists()).toBe(false)
@@ -257,6 +357,9 @@ describe('OpsTrafficCards', () => {
     }))
     for (const metric of ['original', 'actual', 'compression']) {
       expect(wrapper.get(`[data-testid="traffic-upstream-${metric}"]`).text()).toBe('—')
+    }
+    for (const metric of ['original', 'actual']) {
+      expect(wrapper.get(`[data-testid="traffic-upstream-${metric}-bandwidth"]`).text()).toBe('—')
     }
     expect(bodyTestId('traffic-upstream-original-coverage').textContent).toContain('admin.ops.traffic.coverageUnknown')
   })

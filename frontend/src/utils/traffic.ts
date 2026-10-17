@@ -1,4 +1,5 @@
 const BYTE_UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB'] as const
+const BANDWIDTH_UNITS = ['bps', 'kbps', 'Mbps', 'Gbps', 'Tbps', 'Pbps', 'Ebps'] as const
 
 const isKnownByteCount = (bytes: number | null | undefined): bytes is number =>
   typeof bytes === 'number' && Number.isFinite(bytes) && bytes >= 0
@@ -20,6 +21,31 @@ export function formatTrafficBytes(bytes: number | null | undefined): string {
     unit += 1
   }
   return `${Number(value.toFixed(2))} ${BYTE_UNITS[unit]}`
+}
+
+/** Average equivalent body bandwidth over the full statistics window, in SI bits/s. */
+export function formatTrafficBandwidth(
+  bytes: number | null | undefined,
+  durationSeconds: number | null | undefined,
+): string {
+  if (!isKnownByteCount(bytes) || typeof durationSeconds !== 'number' || !Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    return '—'
+  }
+
+  let value = (bytes / durationSeconds) * 8
+  if (!Number.isFinite(value)) return '—'
+  if (value > 0 && value < 0.01) return '< 0.01 bps'
+
+  let unit = 0
+  while (value >= 1000 && unit < BANDWIDTH_UNITS.length - 1) {
+    value /= 1000
+    unit += 1
+  }
+  if (Number(value.toFixed(2)) >= 1000 && unit < BANDWIDTH_UNITS.length - 1) {
+    value /= 1000
+    unit += 1
+  }
+  return `${Number(value.toFixed(2))} ${BANDWIDTH_UNITS[unit]}`
 }
 
 /** Savings relative to the original body. Compression can increase its size. */

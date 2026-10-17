@@ -1453,7 +1453,12 @@ function handleToolbarRefresh() {
         </div>
 
         <!-- Entity-body traffic shares the overview's time/platform/group/query-mode filters. -->
-        <OpsTrafficCards :traffic="overview.traffic" :loading="props.loading" />
+        <OpsTrafficCards
+          :traffic="overview.traffic"
+          :start-time="overview.start_time"
+          :end-time="overview.end_time"
+          :loading="props.loading"
+        />
       </div>
     </div>
 

@@ -423,6 +423,40 @@ func TestRegistrySyncOrdersSnapshots(t *testing.T) {
 	require.True(t, registry.Enabled(6))
 }
 
+// TestRegistrySyncUnknownKeepsNegotiatedState pins that an observation without
+// a switch value (a scheduler-cache payload written before the switch existed)
+// refreshes ordering metadata but leaves the negotiated coding alone. Treating
+// that absence as "off" dropped the state on every cache read and made every
+// request probe the upstream again.
+func TestRegistrySyncUnknownKeepsNegotiatedState(t *testing.T) {
+	registry := NewRegistry()
+	newer := time.Now()
+
+	registry.Sync(23, true, newer)
+	slot := registry.existingSlot(23)
+	require.NotNil(t, slot)
+	settled := slot.currentState()
+	require.NotNil(t, settled)
+	settled.mu.Lock()
+	settled.current = AlgorithmZstd
+	settled.tested = true
+	settled.remaining = nil
+	settled.mu.Unlock()
+
+	registry.SyncUnknown(23, newer.Add(time.Second))
+	require.True(t, registry.Enabled(23))
+	require.Same(t, settled, slot.currentState())
+	require.Equal(t, AlgorithmZstd, slot.currentState().current)
+
+	// An explicitly disabled snapshot still drops the negotiated state.
+	registry.Sync(23, false, newer.Add(2*time.Second))
+	require.False(t, registry.Enabled(23))
+
+	// A lagging unknown observation cannot resurrect it.
+	registry.SyncUnknown(23, newer)
+	require.False(t, registry.Enabled(23))
+}
+
 func TestExecuteDisabledAccountForwardsUnchanged(t *testing.T) {
 	body := testBody()
 	registry := NewRegistry()

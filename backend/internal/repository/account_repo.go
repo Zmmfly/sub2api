@@ -153,7 +153,7 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 		SetErrorMessage(account.ErrorMessage).
 		SetSchedulable(account.Schedulable).
 		SetAutoPauseOnExpired(account.AutoPauseOnExpired).
-		SetCompressRequestEnabled(account.CompressRequestEnabled)
+		SetCompressRequestEnabled(account.RequestCompressionEnabled())
 
 	if account.RateMultiplier != nil {
 		builder.SetRateMultiplier(*account.RateMultiplier)
@@ -557,7 +557,7 @@ func (r *accountRepository) updateLockedAccount(
 		SetErrorMessage(account.ErrorMessage).
 		SetSchedulable(schedulable).
 		SetAutoPauseOnExpired(account.AutoPauseOnExpired).
-		SetCompressRequestEnabled(account.CompressRequestEnabled)
+		SetCompressRequestEnabled(account.RequestCompressionEnabled())
 
 	if explicitRateMultiplier != nil {
 		builder.SetRateMultiplier(*explicitRateMultiplier)
@@ -3630,6 +3630,7 @@ func accountEntityToService(m *dbent.Account) *service.Account {
 	}
 
 	rateMultiplier := m.RateMultiplier
+	compressRequestEnabled := m.CompressRequestEnabled
 
 	account := &service.Account{
 		ID:                      m.ID,
@@ -3650,7 +3651,7 @@ func accountEntityToService(m *dbent.Account) *service.Account {
 		LastUsedAt:              m.LastUsedAt,
 		ExpiresAt:               m.ExpiresAt,
 		AutoPauseOnExpired:      m.AutoPauseOnExpired,
-		CompressRequestEnabled:  m.CompressRequestEnabled,
+		CompressRequestEnabled:  &compressRequestEnabled,
 		CreatedAt:               m.CreatedAt,
 		UpdatedAt:               m.UpdatedAt,
 		Schedulable:             m.Schedulable,
@@ -3667,8 +3668,14 @@ func accountEntityToService(m *dbent.Account) *service.Account {
 	}
 	// Every database read refreshes the process-lifetime compression registry.
 	// The row's updated_at orders this observation against concurrent admin
-	// edits and lagging scheduler-cache payloads.
-	reqcompress.SyncAccount(account.ID, account.CompressRequestEnabled, account.UpdatedAt)
+	// edits and lagging scheduler-cache payloads. A missing value stays unknown
+	// instead of reading as "off": dropping the negotiated state here would make
+	// every request probe the upstream again.
+	if account.CompressRequestEnabled != nil {
+		reqcompress.SyncAccount(account.ID, *account.CompressRequestEnabled, account.UpdatedAt)
+	} else {
+		reqcompress.SyncAccountUnknown(account.ID, account.UpdatedAt)
+	}
 	return account
 }
 

@@ -41,19 +41,19 @@ func TestAdminService_UpdateAccount_CompressRequestSwitch(t *testing.T) {
 		CompressRequestEnabled: &enabled,
 	})
 	require.NoError(t, err)
-	require.True(t, updated.CompressRequestEnabled)
+	require.True(t, updated.RequestCompressionEnabled())
 
 	// Omitting the field preserves the stored switch.
 	updated, err = svc.UpdateAccount(context.Background(), account.ID, &UpdateAccountInput{})
 	require.NoError(t, err)
-	require.True(t, updated.CompressRequestEnabled)
+	require.True(t, updated.RequestCompressionEnabled())
 
 	disabled := false
 	updated, err = svc.UpdateAccount(context.Background(), account.ID, &UpdateAccountInput{
 		CompressRequestEnabled: &disabled,
 	})
 	require.NoError(t, err)
-	require.False(t, updated.CompressRequestEnabled)
+	require.False(t, updated.RequestCompressionEnabled())
 }
 
 func TestBuildAccountForCreate_CompressRequestSwitchDefaultsOff(t *testing.T) {
@@ -64,7 +64,7 @@ func TestBuildAccountForCreate_CompressRequestSwitchDefaultsOff(t *testing.T) {
 		Credentials: map[string]any{},
 	}, map[string]any{})
 	require.NoError(t, err)
-	require.False(t, account.CompressRequestEnabled)
+	require.False(t, account.RequestCompressionEnabled())
 
 	enabled := true
 	account, err = buildAccountForCreate(&CreateAccountInput{
@@ -75,5 +75,5 @@ func TestBuildAccountForCreate_CompressRequestSwitchDefaultsOff(t *testing.T) {
 		CompressRequestEnabled: &enabled,
 	}, map[string]any{})
 	require.NoError(t, err)
-	require.True(t, account.CompressRequestEnabled)
+	require.True(t, account.RequestCompressionEnabled())
 }

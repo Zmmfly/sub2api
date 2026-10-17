@@ -201,6 +201,7 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 			v := acc.ExpiresAt.Unix()
 			expiresAt = &v
 		}
+		compressRequestEnabled := acc.RequestCompressionEnabled()
 		dataAccounts = append(dataAccounts, DataAccount{
 			Name:                   acc.Name,
 			Notes:                  acc.Notes,
@@ -214,7 +215,7 @@ func (h *AccountHandler) ExportData(c *gin.Context) {
 			RateMultiplier:         acc.RateMultiplier,
 			ExpiresAt:              expiresAt,
 			AutoPauseOnExpired:     &acc.AutoPauseOnExpired,
-			CompressRequestEnabled: &acc.CompressRequestEnabled,
+			CompressRequestEnabled: &compressRequestEnabled,
 		})
 	}
 

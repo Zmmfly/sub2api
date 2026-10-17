@@ -289,7 +289,6 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 		expiresAt = &unix
 	}
 	autoPauseOnExpired := source.AutoPauseOnExpired
-	compressRequestEnabled := source.CompressRequestEnabled
 	groups, groupIDs := duplicateAccountGroups(source)
 	if err := s.ValidateAccountGroupBindings(ctx, groupIDs); err != nil {
 		return nil, err
@@ -314,7 +313,7 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 		GroupIDs:               groupIDs,
 		ExpiresAt:              expiresAt,
 		AutoPauseOnExpired:     &autoPauseOnExpired,
-		CompressRequestEnabled: &compressRequestEnabled,
+		CompressRequestEnabled: cloneAccountValuePointer(source.CompressRequestEnabled),
 		SkipDefaultGroupBind:   true,
 		SkipMixedChannelCheck:  true,
 	}
@@ -466,7 +465,7 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 		account.AutoPauseOnExpired = true
 	}
 	if input.CompressRequestEnabled != nil {
-		account.CompressRequestEnabled = *input.CompressRequestEnabled
+		account.CompressRequestEnabled = cloneAccountValuePointer(input.CompressRequestEnabled)
 	}
 	if input.RateMultiplier != nil {
 		if *input.RateMultiplier < 0 {
@@ -849,7 +848,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		account.AutoPauseOnExpired = *input.AutoPauseOnExpired
 	}
 	if input.CompressRequestEnabled != nil {
-		account.CompressRequestEnabled = *input.CompressRequestEnabled
+		account.CompressRequestEnabled = cloneAccountValuePointer(input.CompressRequestEnabled)
 	}
 
 	// 先验证分组是否存在（在任何写操作之前）

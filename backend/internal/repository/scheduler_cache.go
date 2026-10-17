@@ -971,7 +971,14 @@ func decodeCachedAccount(val any) (*service.Account, error) {
 	// Cached reads are the gateway's hot path, so this is also the main place
 	// the compression registry learns whether an account is opted in. The cached
 	// updated_at prevents a lagging payload from undoing a newer admin edit.
-	reqcompress.SyncAccount(account.ID, account.CompressRequestEnabled, account.UpdatedAt)
+	// A payload written before the switch existed carries no value here, and that
+	// absence must stay "unknown": reading it as "off" would drop an account's
+	// negotiated coding on every cache read and re-probe the upstream forever.
+	if account.CompressRequestEnabled != nil {
+		reqcompress.SyncAccount(account.ID, *account.CompressRequestEnabled, account.UpdatedAt)
+	} else {
+		reqcompress.SyncAccountUnknown(account.ID, account.UpdatedAt)
+	}
 	return &account, nil
 }
 

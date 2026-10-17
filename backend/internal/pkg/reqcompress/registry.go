@@ -44,6 +44,21 @@ type entry struct {
 // was just switched off. A zero updatedAt carries no ordering information and is
 // always applied.
 func (r *Registry) Sync(accountID int64, enabled bool, updatedAt time.Time) {
+	r.syncObserved(accountID, &enabled, updatedAt)
+}
+
+// SyncUnknown records an observation that carries no switch value. A scheduler
+// cache payload written before the switch existed has no field at all, and
+// reading that absence as "off" would drop an account's negotiated state on
+// every cache read, making every request probe the upstream again. Ordering
+// metadata is still refreshed; the negotiated state is left untouched.
+func (r *Registry) SyncUnknown(accountID int64, updatedAt time.Time) {
+	r.syncObserved(accountID, nil, updatedAt)
+}
+
+// syncObserved applies one switch observation. A nil enabled value means the
+// observer knew nothing about the switch, which is not the same as "disabled".
+func (r *Registry) syncObserved(accountID int64, enabled *bool, updatedAt time.Time) {
 	if r == nil || accountID <= 0 {
 		return
 	}
@@ -59,8 +74,12 @@ func (r *Registry) Sync(accountID int64, enabled bool, updatedAt time.Time) {
 		}
 		slot.syncedAt = updatedAt
 	}
+	if enabled == nil {
+		slot.mu.Unlock()
+		return
+	}
 	transition := ""
-	if enabled {
+	if *enabled {
 		if slot.state == nil {
 			slot.state = newState()
 			transition = "enabled"
@@ -127,6 +146,12 @@ var defaultRegistry = NewRegistry()
 // SyncAccount mirrors one account's switch into the default registry.
 func SyncAccount(accountID int64, enabled bool, updatedAt time.Time) {
 	defaultRegistry.Sync(accountID, enabled, updatedAt)
+}
+
+// SyncAccountUnknown mirrors an account observation that carries no switch
+// value, so an older payload cannot disable an already negotiated account.
+func SyncAccountUnknown(accountID int64, updatedAt time.Time) {
+	defaultRegistry.SyncUnknown(accountID, updatedAt)
 }
 
 // Enabled reports whether the default registry has compression enabled for the

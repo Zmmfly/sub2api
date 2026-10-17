@@ -73,18 +73,17 @@ func TestUpstreamRequestCompressionNegotiatesAndMeasuresTraffic(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 
 	require.Equal(t, []string{"br", "zstd", "deflate"}, attempts)
+	require.Len(t, compressedSizes, 3)
 	collector.Finalize()
 	usage := collector.Snapshot()
 	require.NotNil(t, usage)
 	require.NotNil(t, usage.Upstream)
 	require.NotNil(t, usage.Upstream.Request)
+	// Rejected probes are measured apart from the request, so the usage record
+	// only describes the deflate attempt that was actually delivered.
 	require.True(t, usage.Upstream.Request.Compressed)
-	require.Equal(t, int64(len(original))*int64(len(attempts)), *usage.Upstream.Request.OriginalBytes)
-	var wantActual int64
-	for _, size := range compressedSizes {
-		wantActual += size
-	}
-	require.Equal(t, wantActual, *usage.Upstream.Request.ActualBytes)
+	require.Equal(t, int64(len(original)), *usage.Upstream.Request.OriginalBytes)
+	require.Equal(t, compressedSizes[len(compressedSizes)-1], *usage.Upstream.Request.ActualBytes)
 	require.NotNil(t, usage.Upstream.Request.Ratio())
 	require.Greater(t, *usage.Upstream.Request.Ratio(), 0.0)
 }

@@ -201,6 +201,41 @@ func (c *Collector) ExcludeUpstream() {
 	}
 }
 
+// Adopt moves every measurement other collected into c. It exists for probes
+// that were measured apart from the request only because they might be
+// discarded: once such an attempt turns out to be the delivered request, its
+// counters belong to the request. Bodies already wrapped by the transport keep
+// updating the same counters after the move, so adoption must happen before the
+// destination is finalized. The source is left empty, so adopting twice cannot
+// double count.
+//
+// A finalized collector is never extended, and a finalized source is refused:
+// its measurements were already published through OnFinalize and must not be
+// published twice. Lock order is always source then destination.
+func (c *Collector) Adopt(other *Collector) bool {
+	if c == nil || other == nil || c == other {
+		return false
+	}
+	other.mu.Lock()
+	defer other.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// An excluded source measured a non-HTTP session, not an entity body.
+	if c.finalized || other.finalized || other.excluded || other.upstreamExcluded {
+		return false
+	}
+	adopted := false
+	for direction := range other.bodies {
+		if len(other.bodies[direction]) == 0 {
+			continue
+		}
+		c.bodies[direction] = append(c.bodies[direction], other.bodies[direction]...)
+		other.bodies[direction] = nil
+		adopted = true
+	}
+	return adopted
+}
+
 func (c *Collector) snapshotLocked() *Usage {
 	if c.excluded {
 		return nil

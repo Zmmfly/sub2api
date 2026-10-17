@@ -299,10 +299,10 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 }
 
 // doUpstreamRequestWithCompression applies the account's opted-in request
-// content coding before the caller sends anything. Every attempt, including a
-// rejected coding and the final identity fallback, is a separate
-// traffic-instrumented request, matching the existing retry measurement
-// semantics.
+// content coding before the caller sends anything. Each trial attempt is a
+// separate traffic-instrumented request measured in its own collector: only the
+// attempt handed back to the caller is adopted into the request's usage record,
+// so a rejected probe never inflates the traffic a client request reports.
 func doUpstreamRequestWithCompression(client *http.Client, req *http.Request, accountID int64) (*http.Response, error) {
 	if req == nil || !reqcompress.Enabled(accountID) {
 		return doUpstreamRequest(client, req)

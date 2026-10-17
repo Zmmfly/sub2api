@@ -11,7 +11,7 @@ Traffic statistics count **HTTP entity-body bytes**, not network interface or bi
 | `upstream.response` | Upstream response body, before gateway response conversion |
 | `downstream.response` | Body accepted by the client-facing response writer, after gateway conversion |
 
-Each body has `actual_bytes`, `original_bytes`, and `compressed`. Actual means the encoded body at that boundary; original means its uncompressed representation at the **same** boundary. The four directions can legitimately differ after protocol or content conversion. Upstream values accumulate all observed HTTP attempts, including retries and failover, rather than just the successful attempt.
+Each body has `actual_bytes`, `original_bytes`, and `compressed`. Actual means the encoded body at that boundary; original means its uncompressed representation at the **same** boundary. The four directions can legitimately differ after protocol or content conversion. Upstream values accumulate all observed HTTP attempts, including retries and failover, rather than just the successful attempt. Request-body compression probes are the exception: a coded attempt that is rejected or discarded while negotiating a `Content-Encoding` is measured in its own collector, logged with its sent bytes, and excluded from the request's usage record, which then describes only the attempt returned to the client.
 
 Compression savings are `(1 - actual_bytes / original_bytes) * 100%`. A negative result means encoding enlarged the body. The rate is unknown when the original size is zero or either value is unavailable. `compressed` records encoding, not whether the encoded body was smaller. This matters for small gzip bodies and retries combining encoded and identity responses.
 

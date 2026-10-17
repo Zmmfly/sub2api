@@ -511,6 +511,102 @@ func TestOriginalRequestBodyAnnotationRetained(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestExecuteKeepsDiscardedProbeTrafficOutOfUsage verifies that probing codings
+// the upstream rejects never reaches the request's usage record: a trial that
+// falls back to identity must be recorded as one plaintext request.
+func TestExecuteKeepsDiscardedProbeTrafficOutOfUsage(t *testing.T) {
+	body := testBody()
+	registry := NewRegistry()
+	registry.Sync(19, true, time.Time{})
+
+	collector := traffic.NewCollector()
+	req := newTestRequest(t, body)
+	req = req.WithContext(traffic.WithCollector(req.Context(), collector))
+
+	var probes []*traffic.Collector
+	send := func(attempt *http.Request) (*http.Response, error) {
+		probe := traffic.FromContext(attempt.Context())
+		require.NotNil(t, probe)
+		encoding := attempt.Header.Get("Content-Encoding")
+		if encoding == "" {
+			require.Same(t, collector, probe, "the identity fallback is the delivered request")
+			counter := probe.Begin(traffic.UpstreamRequest, false)
+			counter.AddOriginal(len(body))
+			counter.AddActual(len(body))
+			counter.CompleteOriginal()
+			counter.CompleteActual()
+			return okResponse("identity"), nil
+		}
+		require.NotSame(t, collector, probe, "a coded attempt must be measured apart")
+		probes = append(probes, probe)
+		counter := probe.Begin(traffic.UpstreamRequest, true)
+		counter.SetOriginal(int64(len(body)))
+		counter.AddActual(len(body) / 4)
+		counter.CompleteActual()
+		return rejectionResponse("unsupported content encoding"), nil
+	}
+
+	resp, err := registry.Execute(19, req, send)
+	require.NoError(t, err)
+	require.Equal(t, "identity", readAll(t, resp.Body))
+	require.Len(t, probes, 3)
+
+	collector.Finalize()
+	usage := collector.Snapshot()
+	require.NotNil(t, usage.Upstream)
+	require.NotNil(t, usage.Upstream.Request)
+	require.False(t, usage.Upstream.Request.Compressed)
+	require.EqualValues(t, len(body), *usage.Upstream.Request.OriginalBytes)
+	require.EqualValues(t, len(body), *usage.Upstream.Request.ActualBytes)
+	require.NotNil(t, usage.Upstream.Request.Ratio())
+	require.Zero(t, *usage.Upstream.Request.Ratio(), "a plaintext request saves nothing")
+}
+
+// TestExecuteAdoptsDeliveredCodingTraffic verifies that the accepted attempt is
+// still recorded: its probe counters move into the request's collector, and
+// bodies wrapped by the transport keep updating them after the move.
+func TestExecuteAdoptsDeliveredCodingTraffic(t *testing.T) {
+	body := testBody()
+	registry := NewRegistry()
+	registry.Sync(20, true, time.Time{})
+
+	collector := traffic.NewCollector()
+	req := newTestRequest(t, body)
+	req = req.WithContext(traffic.WithCollector(req.Context(), collector))
+
+	const sentBytes = 128
+	send := func(attempt *http.Request) (*http.Response, error) {
+		probe := traffic.FromContext(attempt.Context())
+		require.NotNil(t, probe)
+		require.NotSame(t, collector, probe)
+		counter := probe.Begin(traffic.UpstreamRequest, true)
+		counter.SetOriginal(int64(len(body)))
+		counter.AddActual(sentBytes)
+		counter.CompleteActual()
+		responseCounter := probe.Begin(traffic.UpstreamResponse, false)
+		responseCounter.AddActual(16)
+		responseCounter.AddOriginal(16)
+		responseCounter.CompleteActual()
+		responseCounter.CompleteOriginal()
+		return okResponse("compressed"), nil
+	}
+
+	resp, err := registry.Execute(20, req, send)
+	require.NoError(t, err)
+	require.Equal(t, "compressed", readAll(t, resp.Body))
+
+	collector.Finalize()
+	usage := collector.Snapshot()
+	require.NotNil(t, usage.Upstream)
+	require.NotNil(t, usage.Upstream.Request)
+	require.True(t, usage.Upstream.Request.Compressed)
+	require.EqualValues(t, len(body), *usage.Upstream.Request.OriginalBytes)
+	require.EqualValues(t, sentBytes, *usage.Upstream.Request.ActualBytes)
+	require.NotNil(t, usage.Upstream.Request.Ratio())
+	require.NotNil(t, usage.Upstream.Response)
+	require.EqualValues(t, 16, *usage.Upstream.Response.ActualBytes)
+}
+
 func mustCompress(t *testing.T, body []byte, algorithm Algorithm) []byte {
 	t.Helper()
 	encoded, err := encodeBody(algorithm, body)

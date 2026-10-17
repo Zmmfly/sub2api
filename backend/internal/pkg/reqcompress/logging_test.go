@@ -2,6 +2,7 @@ package reqcompress
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/traffic"
 )
 
 func TestMain(m *testing.M) {
@@ -101,6 +104,35 @@ func TestExecuteLogsSettledIdentityFallback(t *testing.T) {
 	require.Contains(t, out, "upstream_request_id=req-abc")
 	require.Contains(t, out, `level=WARN msg="reqcompress pinned identity"`)
 	require.Contains(t, out, "reason=fallback_succeeded")
+}
+
+func TestExecuteLogsDiscardedProbeBytes(t *testing.T) {
+	logs := captureLogs(t)
+	body := testBody()
+	registry := NewRegistry()
+	registry.Sync(21, true, time.Time{})
+
+	_, err := registry.Execute(21, newTestRequest(t, body), func(req *http.Request) (*http.Response, error) {
+		encoding := req.Header.Get("Content-Encoding")
+		if encoding == "" {
+			require.Nil(t, traffic.FromContext(req.Context()))
+			return okResponse("identity"), nil
+		}
+		probe := traffic.FromContext(req.Context())
+		require.NotNil(t, probe)
+		counter := probe.Begin(traffic.UpstreamRequest, true)
+		counter.SetOriginal(int64(len(body)))
+		counter.AddActual(len(body) / 2)
+		counter.CompleteActual()
+		return rejectionResponse("unsupported content encoding"), nil
+	})
+	require.NoError(t, err)
+
+	out := logs.String()
+	require.Contains(t, out, `level=WARN msg="reqcompress coding rejected"`)
+	require.Contains(t, out, fmt.Sprintf("original_bytes=%d", len(body)))
+	require.Contains(t, out, fmt.Sprintf("sent_bytes=%d", len(body)/2))
+	require.Contains(t, out, "ratio_percent=50")
 }
 
 func TestExecuteLogsSettledCodingAtInfo(t *testing.T) {

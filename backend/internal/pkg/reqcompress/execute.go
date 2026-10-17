@@ -108,10 +108,22 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 				}
 				return resp, nil
 			}
-			// The coded attempt failed with an error that may or may not be
+			status := resp.StatusCode
+			if ownsNegotiation {
+				// An ambiguous failure during the trial must still walk the
+				// preference order: a provider may reject brotli with a generic
+				// error while accepting zstd or deflate. If every coding fails,
+				// the loop ends with an identity attempt and pins identity.
+				slog.Warn("reqcompress coding unverified", "account_id", accountID,
+					"algorithm", algorithm, "status", status, "host", logHost(req),
+					"method", req.Method, "upstream_request_id", upstreamRequestID(resp))
+				drainAndClose(resp)
+				negotiation.negotiationCandidateFailed(algorithm)
+				continue
+			}
+			// The settled coding failed with an error that may or may not be
 			// coding-related. Retry once as identity so the feature cannot turn a
 			// request that would otherwise succeed into a failure.
-			status := resp.StatusCode
 			fallbackFields := []any{"account_id", accountID, "algorithm", algorithm,
 				"status", status, "host", logHost(req), "method", req.Method,
 				"upstream_request_id", upstreamRequestID(resp)}
@@ -125,10 +137,11 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 			if identityErr != nil {
 				if ownsNegotiation {
 					// A failed trial must not keep probing on every request.
-					negotiation.pinIdentity()
-					slog.Warn("reqcompress pinned identity", "account_id", accountID,
-						"algorithm", algorithm, "status", status, "host", logHost(req),
-						"method", req.Method, "reason", "fallback_error", "error", identityErr)
+					if negotiation.pinIdentity() {
+						slog.Warn("reqcompress pinned identity", "account_id", accountID,
+							"algorithm", algorithm, "status", status, "host", logHost(req),
+							"method", req.Method, "reason", "fallback_error", "error", identityErr)
+					}
 				}
 				return identityResp, identityErr
 			}
@@ -140,10 +153,11 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 				if !encodingAccepted(identityResp) {
 					reason = "trial_failed"
 				}
-				negotiation.pinIdentity()
-				slog.Warn("reqcompress pinned identity", "account_id", accountID,
-					"algorithm", algorithm, "status", status, "host", logHost(req),
-					"method", req.Method, "reason", reason)
+				if negotiation.pinIdentity() {
+					slog.Warn("reqcompress pinned identity", "account_id", accountID,
+						"algorithm", algorithm, "status", status, "host", logHost(req),
+						"method", req.Method, "reason", reason)
+				}
 			}
 			return identityResp, nil
 		}
@@ -169,8 +183,12 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 		work = append(work, next...)
 	}
 	if ownsNegotiation {
+		negotiation.pinIdentity()
 		slog.Warn("reqcompress no coding accepted", "account_id", accountID,
 			"host", logHost(req), "method", req.Method, "last_status", lastStatus)
+		slog.Warn("reqcompress pinned identity", "account_id", accountID,
+			"host", logHost(req), "method", req.Method,
+			"reason", "all_codings_failed", "last_status", lastStatus)
 	}
 	return send(req)
 }

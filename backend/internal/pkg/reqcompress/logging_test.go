@@ -40,23 +40,63 @@ func TestExecuteLogsObservabilityEvents(t *testing.T) {
 	resp, err := registry.Execute(16, newTestRequest(t, body), func(req *http.Request) (*http.Response, error) {
 		encoding := req.Header.Get("Content-Encoding")
 		sent = append(sent, encoding)
-		if encoding == "" {
-			return okResponse("identity"), nil
+		if encoding == "br" {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     http.Header{"X-Request-Id": []string{"req-abc"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":"rejected request"}`)),
+			}, nil
 		}
-		return &http.Response{
-			StatusCode: http.StatusForbidden,
-			Header:     http.Header{"X-Request-Id": []string{"req-abc"}},
-			Body:       io.NopCloser(strings.NewReader(`{"error":"rejected request"}`)),
-		}, nil
+		return okResponse("zstd"), nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, []string{"br", "zstd"}, sent)
+
+	out := logs.String()
+	require.Contains(t, out, `msg="reqcompress attempt"`)
+	require.Contains(t, out, "content_encoding=br")
+	require.Contains(t, out, `level=WARN msg="reqcompress coding unverified"`)
+	require.Contains(t, out, "algorithm=br")
+	require.Contains(t, out, "status=403")
+	require.Contains(t, out, "upstream_request_id=req-abc")
+	require.Contains(t, out, `level=INFO msg="reqcompress coding settled"`)
+	require.Contains(t, out, "algorithm=zstd")
+}
+
+func TestExecuteLogsSettledIdentityFallback(t *testing.T) {
+	logs := captureLogs(t)
+	body := testBody()
+	registry := NewRegistry()
+	registry.Sync(18, true, time.Time{})
+
+	// Settle on brotli first.
+	_, err := registry.Execute(18, newTestRequest(t, body), func(req *http.Request) (*http.Response, error) {
+		return okResponse("ok"), nil
+	})
+	require.NoError(t, err)
+	logs.Reset()
+
+	var sent []string
+	resp, err := registry.Execute(18, newTestRequest(t, body), func(req *http.Request) (*http.Response, error) {
+		encoding := req.Header.Get("Content-Encoding")
+		sent = append(sent, encoding)
+		if encoding == "br" {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     http.Header{"X-Request-Id": []string{"req-abc"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":"rejected request"}`)),
+			}, nil
+		}
+		return okResponse("identity"), nil
 	})
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, []string{"br", ""}, sent)
 
 	out := logs.String()
-	require.Contains(t, out, `msg="reqcompress attempt"`)
-	require.Contains(t, out, "content_encoding=br")
 	require.Contains(t, out, `level=WARN msg="reqcompress identity fallback"`)
+	require.Contains(t, out, "algorithm=br")
 	require.Contains(t, out, "status=403")
 	require.Contains(t, out, "upstream_request_id=req-abc")
 	require.Contains(t, out, `level=WARN msg="reqcompress pinned identity"`)

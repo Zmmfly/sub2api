@@ -102,18 +102,22 @@ func (s *state) abortNegotiation() {
 	s.negotiating = false
 }
 
-// pinIdentity stops compression for the process lifetime. It is used when a
-// coded attempt failed and the identity fallback could not prove the coding was
-// safe, so the account must stay usable without compression until the switch is
-// toggled again or the process restarts.
-func (s *state) pinIdentity() {
+// pinIdentity stops compression for the process lifetime and reports whether it
+// changed the state. It is used when a coded attempt failed and the identity
+// fallback could not prove the coding was safe, so the account must stay usable
+// without compression until the switch is toggled again or the process restarts.
+func (s *state) pinIdentity() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.tested && s.current == AlgorithmNone && len(s.remaining) == 0 {
+		return false
+	}
 	s.current = AlgorithmNone
 	s.tested = true
 	s.negotiating = false
 	s.remaining = nil
+	return true
 }
 
 // retireSettled handles an upstream that stopped accepting the settled coding.

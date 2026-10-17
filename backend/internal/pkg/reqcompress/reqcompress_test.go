@@ -220,7 +220,7 @@ func TestExecuteRenegotiatesAfterSettledCodingBreaks(t *testing.T) {
 	require.Equal(t, []string{"zstd"}, seen)
 }
 
-func TestExecuteFallsBackToIdentityOnAmbiguousError(t *testing.T) {
+func TestExecuteProbesRemainingCodingsOnAmbiguousError(t *testing.T) {
 	body := testBody()
 	registry := NewRegistry()
 	registry.Sync(4, true, time.Time{})
@@ -229,31 +229,33 @@ func TestExecuteFallsBackToIdentityOnAmbiguousError(t *testing.T) {
 	resp, err := registry.Execute(4, newTestRequest(t, body), func(req *http.Request) (*http.Response, error) {
 		encoding := req.Header.Get("Content-Encoding")
 		sent = append(sent, encoding)
-		if encoding == "" {
-			return okResponse("identity"), nil
+		require.NotEmpty(t, encoding)
+		switch Algorithm(encoding) {
+		case AlgorithmBrotli:
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Body:       io.NopCloser(strings.NewReader(`{"error":"rejected request"}`)),
+			}, nil
+		default:
+			return okResponse(encoding), nil
 		}
-		require.Equal(t, "br", encoding, "the coded attempt must advertise Content-Encoding")
-		return &http.Response{
-			StatusCode: http.StatusForbidden,
-			Body:       io.NopCloser(strings.NewReader(`{"error":"rejected request"}`)),
-		}, nil
 	})
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Equal(t, "identity", readAll(t, resp.Body))
-	require.Equal(t, []string{"br", ""}, sent)
+	require.Equal(t, "zstd", readAll(t, resp.Body))
+	require.Equal(t, []string{"br", "zstd"}, sent)
 
-	// A successful identity fallback pins identity for the process lifetime.
+	// The accepted coding settles for subsequent requests.
 	sent = nil
 	_, err = registry.Execute(4, newTestRequest(t, body), func(req *http.Request) (*http.Response, error) {
 		sent = append(sent, req.Header.Get("Content-Encoding"))
 		return okResponse("ok"), nil
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{""}, sent)
+	require.Equal(t, []string{"zstd"}, sent)
 }
 
-func TestExecutePinsIdentityWhenFallbackAlsoFails(t *testing.T) {
+func TestExecutePinsIdentityWhenEveryCodingFails(t *testing.T) {
 	body := testBody()
 	registry := NewRegistry()
 	registry.Sync(13, true, time.Time{})
@@ -270,10 +272,10 @@ func TestExecutePinsIdentityWhenFallbackAlsoFails(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	require.Equal(t, "messages: invalid role", errorMessage(t, resp.Body))
-	require.Equal(t, []string{"br", ""}, sent)
+	require.Equal(t, []string{"br", "zstd", "deflate", ""}, sent)
 
-	// The trial must not keep probing on every request after the fallback also
-	// failed; identity is pinned and the error is returned directly.
+	// The trial must not keep probing on every request after all codings failed;
+	// identity is pinned and the error is returned directly.
 	sent = nil
 	resp, err = registry.Execute(13, newTestRequest(t, body), send)
 	require.NoError(t, err)

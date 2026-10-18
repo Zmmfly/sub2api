@@ -152,6 +152,7 @@ describe('OpsTrafficCards', () => {
       }
     }
     expect(wrapper.get('[data-testid="traffic-upstream-original"]').text()).toBe('4 KiB')
+    expect(bodyTestId('traffic-upstream-request-original').textContent).toBe('1 KiB, —')
   })
 
   it('explains the bandwidth basis on hover and keyboard focus for all four measurements', async () => {
@@ -224,8 +225,8 @@ describe('OpsTrafficCards', () => {
     originalTrigger.element.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }))
     await nextTick()
     expect(originalTooltip.style.display).not.toBe('none')
-    expect(bodyTestId('traffic-upstream-request-original').textContent).toBe('1 KiB')
-    expect(bodyTestId('traffic-upstream-response-original').textContent).toBe('3 KiB')
+    expect(bodyTestId('traffic-upstream-request-original').textContent).toBe('1 KiB, 136.53 bps')
+    expect(bodyTestId('traffic-upstream-response-original').textContent).toBe('3 KiB, 409.6 bps')
     expect(bodyTestId('traffic-upstream-request-original-coverage').textContent).toContain('admin.ops.traffic.directionCoverage:{"count":2,"total":2}')
     expect(bodyTestId('traffic-upstream-response-original-coverage').textContent).toContain('admin.ops.traffic.directionCoverage:{"count":2,"total":2}')
     originalTrigger.element.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }))
@@ -237,8 +238,8 @@ describe('OpsTrafficCards', () => {
     await nextTick()
     const actualTooltip = tooltipFor('traffic-upstream-request-actual')
     expect(actualTooltip.style.display).not.toBe('none')
-    expect(bodyTestId('traffic-upstream-request-actual').textContent).toBe('512 B')
-    expect(bodyTestId('traffic-upstream-response-actual').textContent).toBe('1.5 KiB')
+    expect(bodyTestId('traffic-upstream-request-actual').textContent).toBe('512 B, 68.27 bps')
+    expect(bodyTestId('traffic-upstream-response-actual').textContent).toBe('1.5 KiB, 204.8 bps')
     expect(bodyTestId('traffic-upstream-request-actual-coverage').textContent).toContain('admin.ops.traffic.directionCoverage:{"count":2,"total":2}')
     expect(bodyTestId('traffic-upstream-response-actual-coverage').textContent).toContain('admin.ops.traffic.directionCoverage:{"count":2,"total":2}')
 
@@ -247,10 +248,18 @@ describe('OpsTrafficCards', () => {
     expect(actualTooltip.style.display).toBe('none')
     expect(wrapper.get('[data-testid="traffic-upstream-compression"]').text()).toBe('50.0%')
 
-    expect(bodyTestId('traffic-downstream-request-original').textContent).toBe('100 B')
-    expect(bodyTestId('traffic-downstream-response-original').textContent).toBe('200 B')
-    expect(bodyTestId('traffic-downstream-request-actual').textContent).toBe('50 B')
-    expect(bodyTestId('traffic-downstream-response-actual').textContent).toBe('150 B')
+    expect(bodyTestId('traffic-downstream-request-original').textContent).toBe('100 B, 13.33 bps')
+    expect(bodyTestId('traffic-downstream-response-original').textContent).toBe('200 B, 26.67 bps')
+    expect(bodyTestId('traffic-downstream-request-actual').textContent).toBe('50 B, 6.67 bps')
+    expect(bodyTestId('traffic-downstream-response-actual').textContent).toBe('150 B, 20 bps')
+  })
+
+  it('recalculates direction bandwidth from the returned statistics window', async () => {
+    const wrapper = mountCards(traffic())
+    expect(bodyTestId('traffic-upstream-request-original').textContent).toBe('1 KiB, 136.53 bps')
+    await wrapper.setProps({ startTime: '2026-06-01T00:00:00Z', endTime: '2026-06-01T00:02:00Z' })
+    expect(bodyTestId('traffic-upstream-request-original').textContent).toBe('1 KiB, 68.27 bps')
+    expect(bodyTestId('traffic-upstream-response-original').textContent).toBe('3 KiB, 204.8 bps')
   })
 
   it.each([undefined, null, traffic({ upstream: unknownLink(), downstream: unknownLink() })])(
@@ -292,8 +301,8 @@ describe('OpsTrafficCards', () => {
     expect(wrapper.get('[data-testid="traffic-upstream-actual-bandwidth"]').text()).toBe('0 bps')
     expect(wrapper.get('[data-testid="traffic-downstream-original-bandwidth"]').text()).toBe('—')
     expect(wrapper.get('[data-testid="traffic-downstream-actual-bandwidth"]').text()).toBe('0 bps')
-    expect(bodyTestId('traffic-upstream-request-original').textContent).toBe('0 B')
-    expect(bodyTestId('traffic-upstream-response-actual').textContent).toBe('0 B')
+    expect(bodyTestId('traffic-upstream-request-original').textContent).toBe('0 B, 0 bps')
+    expect(bodyTestId('traffic-upstream-response-actual').textContent).toBe('0 B, 0 bps')
     expect(wrapper.get('[data-testid="traffic-downstream-original"]').text()).toBe('—')
     expect(wrapper.get('[data-testid="traffic-downstream-actual"]').text()).toBe('0 B')
     expect(wrapper.get('[data-testid="traffic-downstream-compression"]').text()).toBe('—')

@@ -48,6 +48,21 @@ export function formatTrafficBandwidth(
   return `${Number(value.toFixed(2))} ${BANDWIDTH_UNITS[unit]}`
 }
 
+/**
+ * Body bytes followed by their equivalent bandwidth over the same window,
+ * comma-separated, for example `959.97 MiB, 1.5 Mbps`.
+ * Missing measurements keep the byte placeholder instead of inventing a rate;
+ * a known total with an unknown window reports the bandwidth as unknown.
+ */
+export function formatTrafficBytesWithBandwidth(
+  bytes: number | null | undefined,
+  durationSeconds: number | null | undefined,
+): string {
+  const formattedBytes = formatTrafficBytes(bytes)
+  if (formattedBytes === '—') return formattedBytes
+  return `${formattedBytes}, ${formatTrafficBandwidth(bytes, durationSeconds)}`
+}
+
 /** Savings relative to the original body. Compression can increase its size. */
 export function formatTrafficCompressionRate(
   originalBytes: number | null | undefined,

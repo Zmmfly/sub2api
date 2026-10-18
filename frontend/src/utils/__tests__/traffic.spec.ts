@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatTrafficBandwidth, formatTrafficBytes, formatTrafficCompressionRate } from '../traffic'
+import { formatTrafficBandwidth, formatTrafficBytes, formatTrafficBytesWithBandwidth, formatTrafficCompressionRate } from '../traffic'
 
 describe('formatTrafficBytes', () => {
   it.each([
@@ -65,6 +65,28 @@ describe('formatTrafficBandwidth', () => {
     [Number.MAX_VALUE, Number.MIN_VALUE, '—'],
   ])('formats %s bytes over %s seconds as %s', (bytes, seconds, expected) => {
     expect(formatTrafficBandwidth(bytes, seconds)).toBe(expected)
+  })
+})
+
+describe('formatTrafficBytesWithBandwidth', () => {
+  it.each([
+    [1024, 60, '1 KiB, 136.53 bps'],
+    [1024, 3.2, '1 KiB, 2.56 kbps'],
+    [187_500, 1, '183.11 KiB, 1.5 Mbps'],
+    [1_006_601_503, 5368.5413493333335, '959.97 MiB, 1.5 Mbps'],
+    [0, 60, '0 B, 0 bps'],
+    [1, 1000, '1 B, < 0.01 bps'],
+    [1024, 0, '1 KiB, —'],
+    [1024, null, '1 KiB, —'],
+    [1024, undefined, '1 KiB, —'],
+    [undefined, 60, '—'],
+    [null, 60, '—'],
+    [NaN, 60, '—'],
+    [-1, 60, '—'],
+    [1024, -1, '1 KiB, —'],
+    [1024, Infinity, '1 KiB, —'],
+  ])('formats %s bytes over %s seconds as %s', (bytes, seconds, expected) => {
+    expect(formatTrafficBytesWithBandwidth(bytes, seconds)).toBe(expected)
   })
 })
 

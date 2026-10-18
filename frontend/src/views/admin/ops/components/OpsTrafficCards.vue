@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import type { OpsTrafficLink, OpsTrafficSummary } from '@/api/admin/ops'
-import { formatTrafficBandwidth, formatTrafficBytes } from '@/utils/traffic'
+import { formatTrafficBandwidth, formatTrafficBytes, formatTrafficBytesWithBandwidth } from '@/utils/traffic'
 
 const props = withDefaults(defineProps<{
   traffic?: OpsTrafficSummary | null
@@ -209,9 +209,9 @@ function compressionLabel(summary: OpsTrafficLink | undefined): string {
                   <div class="flex items-baseline justify-between gap-4">
                     <span class="font-semibold">{{ t(`admin.ops.traffic.${direction}`) }}</span>
                     <span
-                      class="tabular-nums"
+                      class="whitespace-nowrap tabular-nums"
                       :data-testid="`traffic-${side.key}-${direction}-${metric.key}`"
-                    >{{ formatTrafficBytes(side.summary?.[direction]?.[metric.bytes]) }}</span>
+                    >{{ formatTrafficBytesWithBandwidth(side.summary?.[direction]?.[metric.bytes], durationSeconds) }}</span>
                   </div>
                   <p
                     class="text-gray-300"

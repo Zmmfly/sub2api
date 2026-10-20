@@ -57,6 +57,72 @@ func TestOpsTrafficSummaryUnknownZeroAndPairedCoverage(t *testing.T) {
 
 func float64TrafficPtr(v float64) *float64 { return &v }
 
+func TestOpsTrafficDirectionSummaryUsesPairedSamplesOnly(t *testing.T) {
+	tests := []struct {
+		name string
+		in   opsTrafficDirectionAggregate
+		want *float64
+	}{
+		{name: "unknown"},
+		{name: "measured empty", in: opsTrafficDirectionAggregate{
+			OriginalBytes: trafficInt64(0), ActualBytes: trafficInt64(0),
+			OriginalSampleCount: 1, ActualSampleCount: 1,
+			PairedSampleCount: trafficInt64(1), PairedOriginalBytes: trafficInt64(0), PairedActualBytes: trafficInt64(0),
+		}},
+		{name: "paired samples only", in: opsTrafficDirectionAggregate{
+			// The independently covered totals would claim 90% here.
+			OriginalBytes: trafficInt64(1000), ActualBytes: trafficInt64(100),
+			OriginalSampleCount: 2, ActualSampleCount: 2,
+			PairedSampleCount: trafficInt64(1), PairedOriginalBytes: trafficInt64(100), PairedActualBytes: trafficInt64(50),
+		}, want: float64TrafficPtr(50)},
+		{name: "encoding overhead is negative", in: opsTrafficDirectionAggregate{
+			OriginalBytes: trafficInt64(100), ActualBytes: trafficInt64(125),
+			OriginalSampleCount: 1, ActualSampleCount: 1,
+			PairedSampleCount: trafficInt64(1), PairedOriginalBytes: trafficInt64(100), PairedActualBytes: trafficInt64(125),
+		}, want: float64TrafficPtr(-25)},
+		{name: "no paired sample", in: opsTrafficDirectionAggregate{
+			OriginalBytes: trafficInt64(100), ActualBytes: trafficInt64(50),
+			OriginalSampleCount: 1, ActualSampleCount: 1, PairedSampleCount: trafficInt64(0),
+		}},
+		{name: "bucket aggregated before directional pairing", in: opsTrafficDirectionAggregate{
+			OriginalBytes: trafficInt64(100), ActualBytes: trafficInt64(50),
+			OriginalSampleCount: 1, ActualSampleCount: 1,
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.in.summary()
+			require.Equal(t, tc.in.OriginalBytes, got.OriginalBytes)
+			require.Equal(t, tc.in.ActualBytes, got.ActualBytes)
+			require.Equal(t, tc.want, got.CompressionPercent)
+		})
+	}
+}
+
+func TestOpsTrafficDirectionMergeKeepsMixedLegacyWindowsUnknown(t *testing.T) {
+	paired := &opsTrafficDirectionAggregate{
+		OriginalBytes: trafficInt64(100), ActualBytes: trafficInt64(50),
+		OriginalSampleCount: 1, ActualSampleCount: 1,
+		PairedSampleCount: trafficInt64(1), PairedOriginalBytes: trafficInt64(100), PairedActualBytes: trafficInt64(50),
+	}
+	legacy := &opsTrafficDirectionAggregate{
+		OriginalBytes: trafficInt64(300), ActualBytes: trafficInt64(150),
+		OriginalSampleCount: 1, ActualSampleCount: 1,
+	}
+	var merged *opsTrafficDirectionAggregate
+	addTrafficDirection(&merged, paired)
+	require.InDelta(t, 50, *merged.summary().CompressionPercent, 1e-9)
+
+	addTrafficDirection(&merged, legacy)
+	got := merged.summary()
+	require.EqualValues(t, 400, *got.OriginalBytes)
+	require.EqualValues(t, 200, *got.ActualBytes)
+	require.Nil(t, got.CompressionPercent, "one legacy bucket must not become a full-window paired ratio")
+	// Merging must not mutate the source buckets.
+	require.Nil(t, legacy.PairedSampleCount)
+	require.EqualValues(t, 100, *paired.PairedOriginalBytes)
+}
+
 func TestOpsTrafficMergePreservesNullableSumsAndPairedDenominator(t *testing.T) {
 	head := opsTrafficAggregate{RequestCount: 2, Upstream: opsTrafficLinkAggregate{
 		OriginalBytes: trafficInt64(100), ActualBytes: trafficInt64(50),

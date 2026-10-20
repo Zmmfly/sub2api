@@ -41,11 +41,12 @@ func TestOpsTrafficOverviewAttachesInstanceIngestionHealth(t *testing.T) {
 
 func TestOpsTrafficOverviewJSONKeepsUnknownDistinctFromMeasuredZero(t *testing.T) {
 	zero := int64(0)
+	negative := -25.0
 	value := OpsTrafficSummary{
 		Source: "http_requests", RequestCount: 1,
 		Downstream: OpsTrafficLink{
 			OriginalBytes: &zero, ActualBytes: &zero, OriginalSampleCount: 1, ActualSampleCount: 1, PairedSampleCount: 1,
-			Request:  &OpsTrafficDirection{OriginalBytes: &zero, ActualBytes: &zero, OriginalSampleCount: 1, ActualSampleCount: 1},
+			Request:  &OpsTrafficDirection{OriginalBytes: &zero, ActualBytes: &zero, OriginalSampleCount: 1, ActualSampleCount: 1, CompressionPercent: &negative},
 			Response: &OpsTrafficDirection{},
 		},
 	}
@@ -69,9 +70,12 @@ func TestOpsTrafficOverviewJSONKeepsUnknownDistinctFromMeasuredZero(t *testing.T
 	require.Equal(t, float64(0), request["actual_bytes"])
 	require.Equal(t, float64(1), request["original_sample_count"])
 	require.Equal(t, float64(1), request["actual_sample_count"])
+	require.Equal(t, float64(-25), request["compression_percent"], "a directional ratio is exposed per direction")
 	require.Nil(t, response["original_bytes"])
 	require.Nil(t, response["actual_bytes"])
 	require.Equal(t, float64(0), response["actual_sample_count"])
+	require.Contains(t, response, "compression_percent")
+	require.Nil(t, response["compression_percent"], "an unknown directional ratio stays null, never zero")
 	require.Contains(t, decoded, "ingestion")
 	require.Nil(t, decoded["ingestion"])
 	require.NotContains(t, decoded, "usage_count")

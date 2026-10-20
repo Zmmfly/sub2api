@@ -37,9 +37,14 @@ type OpsTrafficLink struct {
 // OpsTrafficDirection contains measured byte sums for one body direction.
 // Each sample denominator is RequestCount, not the side's 2 * RequestCount.
 // A nil byte count means no known observation; a measured empty body is zero.
+// CompressionPercent uses ONLY this direction's paired observations, never the
+// independently covered OriginalBytes / ActualBytes sums, and is nil when the
+// ratio is unknown: no paired sample, a non-positive paired original total, or
+// a window that includes buckets aggregated before directional pairing existed.
 type OpsTrafficDirection struct {
-	OriginalBytes       *int64 `json:"original_bytes"`
-	ActualBytes         *int64 `json:"actual_bytes"`
-	OriginalSampleCount int64  `json:"original_sample_count"`
-	ActualSampleCount   int64  `json:"actual_sample_count"`
+	OriginalBytes       *int64   `json:"original_bytes"`
+	ActualBytes         *int64   `json:"actual_bytes"`
+	OriginalSampleCount int64    `json:"original_sample_count"`
+	ActualSampleCount   int64    `json:"actual_sample_count"`
+	CompressionPercent  *float64 `json:"compression_percent"`
 }

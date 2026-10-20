@@ -93,7 +93,7 @@ func TestOpsTrafficDirectionalUnknownAndMeasuredZero(t *testing.T) {
 
 	payload, err := json.Marshal(got.Upstream.Request)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"original_bytes":null,"actual_bytes":0,"original_sample_count":0,"actual_sample_count":1}`, string(payload))
+	require.JSONEq(t, `{"original_bytes":null,"actual_bytes":0,"original_sample_count":0,"actual_sample_count":1,"compression_percent":null}`, string(payload))
 }
 
 func TestOpsTrafficLegacyDirectionalDataIsNotInventedDuringMerge(t *testing.T) {

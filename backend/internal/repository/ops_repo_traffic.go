@@ -40,6 +40,16 @@ type opsTrafficDirectionAggregate struct {
 	ActualBytes         *int64 `json:"actual_bytes"`
 	OriginalSampleCount int64  `json:"original_sample_count"`
 	ActualSampleCount   int64  `json:"actual_sample_count"`
+	// Directional compression uses only bodies with both byte values known.
+	// The paired fields are pointers because a bucket written before directional
+	// pairing existed has no such statistics at all; that is not the same as an
+	// observed zero paired sample count.
+	PairedSampleCount   *int64 `json:"paired_sample_count"`
+	PairedOriginalBytes *int64 `json:"paired_original_bytes"`
+	PairedActualBytes   *int64 `json:"paired_actual_bytes"`
+	// Sticky across merges: a window that mixes buckets with and without the
+	// paired statistics cannot report a ratio from the newer buckets alone.
+	pairedIncomplete bool
 }
 
 func (s opsTrafficAggregate) hasDirectionalBreakdown() bool {
@@ -81,8 +91,20 @@ func addTrafficDirection(dst **opsTrafficDirectionAggregate, src *opsTrafficDire
 	}
 	addNullableTrafficBytes(&out.OriginalBytes, src.OriginalBytes)
 	addNullableTrafficBytes(&out.ActualBytes, src.ActualBytes)
+	addNullableTrafficBytes(&out.PairedOriginalBytes, src.PairedOriginalBytes)
+	addNullableTrafficBytes(&out.PairedActualBytes, src.PairedActualBytes)
 	out.OriginalSampleCount += src.OriginalSampleCount
 	out.ActualSampleCount += src.ActualSampleCount
+	if src.PairedSampleCount == nil {
+		out.pairedIncomplete = true
+	} else {
+		paired := *src.PairedSampleCount
+		if out.PairedSampleCount != nil {
+			paired += *out.PairedSampleCount
+		}
+		out.PairedSampleCount = &paired
+	}
+	out.pairedIncomplete = out.pairedIncomplete || src.pairedIncomplete
 	*dst = &out
 }
 
@@ -117,7 +139,22 @@ func (s *opsTrafficDirectionAggregate) summary() *service.OpsTrafficDirection {
 	return &service.OpsTrafficDirection{
 		OriginalBytes: s.OriginalBytes, ActualBytes: s.ActualBytes,
 		OriginalSampleCount: s.OriginalSampleCount, ActualSampleCount: s.ActualSampleCount,
+		CompressionPercent: s.compressionPercent(),
 	}
+}
+
+// compressionPercent mirrors the side-level rule for a single direction: only
+// paired bodies contribute, and a non-positive paired original total stays
+// unknown instead of producing an infinite rate.
+func (s *opsTrafficDirectionAggregate) compressionPercent() *float64 {
+	if s == nil || s.pairedIncomplete || s.PairedSampleCount == nil || *s.PairedSampleCount == 0 {
+		return nil
+	}
+	if s.PairedOriginalBytes == nil || *s.PairedOriginalBytes <= 0 || s.PairedActualBytes == nil {
+		return nil
+	}
+	percent := (1 - float64(*s.PairedActualBytes)/float64(*s.PairedOriginalBytes)) * 100
+	return &percent
 }
 
 func (s opsTrafficLinkAggregate) summary() service.OpsTrafficLink {
@@ -152,14 +189,19 @@ func opsTrafficExtractSQL(alias string) string {
 
 // Per-direction counts have one potential observation per ledger request. SUM
 // intentionally preserves NULL for an unobserved dimension, while COUNT(value)
-// includes measured zero and excludes missing values.
+// includes measured zero and excludes missing values. The paired statistics use
+// the same predicate as the side-level pair so both ratios share one rule.
 func opsTrafficDirectionAggregateSQL(original, actual string) string {
+	pair := fmt.Sprintf("(%s IS NOT NULL AND %s IS NOT NULL)", original, actual)
 	return fmt.Sprintf(`jsonb_build_object(
         'original_bytes', SUM(%s::numeric),
         'actual_bytes', SUM(%s::numeric),
         'original_sample_count', COUNT(%s),
-        'actual_sample_count', COUNT(%s)
-      )`, original, actual, original, actual)
+        'actual_sample_count', COUNT(%s),
+        'paired_sample_count', COALESCE(SUM((%s)::int), 0),
+        'paired_original_bytes', SUM(CASE WHEN %s THEN %s::numeric END),
+        'paired_actual_bytes', SUM(CASE WHEN %s THEN %s::numeric END)
+      )`, original, actual, original, actual, pair, pair, original, pair, actual)
 }
 
 // opsTrafficAggregateSQL is shared by raw and hourly queries. COALESCE is safe

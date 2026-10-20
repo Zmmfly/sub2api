@@ -30,6 +30,10 @@ export interface OpsTrafficDirection {
   actual_bytes: number | null
   original_sample_count: number
   actual_sample_count: number
+  // Per-direction paired ratio. Null when unknown: no paired sample, a
+  // non-positive paired original total, or a window predating directional
+  // pairing. Never derive it from the independently covered byte totals.
+  compression_percent?: number | null
 }
 
 /** Request + response HTTP entity-body totals for one side of the gateway. */

@@ -1436,6 +1436,7 @@ const shouldReplaceAutoRefreshRow = (current: Account, next: Account) => {
     current.rate_limit_reset_at !== next.rate_limit_reset_at ||
     current.overload_until !== next.overload_until ||
     current.temp_unschedulable_until !== next.temp_unschedulable_until ||
+    current.compress_request_algorithm !== next.compress_request_algorithm ||
     buildOpenAIUsageRefreshKey(current) !== buildOpenAIUsageRefreshKey(next) ||
     buildGrokUsageRefreshKey(current) !== buildGrokUsageRefreshKey(next)
   )

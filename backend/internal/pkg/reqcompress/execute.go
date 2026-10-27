@@ -46,7 +46,11 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 		return send(req)
 	}
 	if err := r.hydrateShared(req.Context(), accountID, negotiation); err != nil {
+		// Without a readable shared snapshot, probing br again could overwrite a
+		// coding another instance already pinned. Send identity for this request
+		// and retry shared initialization on the next one.
 		slog.Warn("reqcompress shared state load failed", "account_id", accountID, "error", err)
+		return send(req)
 	}
 
 	work, ownsNegotiation := negotiation.begin()

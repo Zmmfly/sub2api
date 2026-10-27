@@ -66,6 +66,83 @@ func TestRegistrySharesSettledAlgorithmAcrossInstances(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestRegistrySharedWritesSurviveRequestCancellation(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	registry := sharedTestRegistry(client)
+	const accountID int64 = 709
+	registry.Sync(accountID, true, time.Time{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := newTestRequest(t, testBody()).WithContext(ctx)
+	_, err := registry.Execute(accountID, req, func(attempt *http.Request) (*http.Response, error) {
+		if attempt.Header.Get("Content-Encoding") == "zstd" {
+			// The upstream succeeded, so cancellation of the client-facing request
+			// must not discard the negotiated shared result.
+			cancel()
+			return okResponse("ok"), nil
+		}
+		return rejectionResponse("unsupported content encoding"), nil
+	})
+	require.NoError(t, err)
+	requireSharedAlgorithm(t, server, accountID, AlgorithmZstd)
+
+	registry.deleteSharedAlgorithm(ctx, accountID, AlgorithmZstd)
+	require.False(t, server.Exists(sharedAlgorithmKey(accountID)))
+}
+
+func TestRegistrySharedLoadFailureDoesNotRestartNegotiation(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	writer := sharedTestRegistry(client)
+	observer := sharedTestRegistry(client)
+	const accountID int64 = 710
+	writer.Sync(accountID, true, time.Time{})
+	observer.Sync(accountID, true, time.Time{})
+
+	_, err := writer.Execute(accountID, newTestRequest(t, testBody()), func(attempt *http.Request) (*http.Response, error) {
+		if attempt.Header.Get("Content-Encoding") == "br" {
+			return rejectionResponse("unsupported content encoding"), nil
+		}
+		return okResponse("ok"), nil
+	})
+	require.NoError(t, err)
+	requireSharedAlgorithm(t, server, accountID, AlgorithmZstd)
+
+	// A fresh instance that cannot read the shared result must forward identity
+	// and retry initialization later, not probe br and overwrite zstd.
+	server.Close()
+	var sent []string
+	_, err = observer.Execute(accountID, newTestRequest(t, testBody()), func(attempt *http.Request) (*http.Response, error) {
+		sent = append(sent, attempt.Header.Get("Content-Encoding"))
+		return okResponse("ok"), nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{""}, sent)
+}
+
+func TestRegistrySettledAlgorithmTracksSharedChanges(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	writer := sharedTestRegistry(client)
+	observer := sharedTestRegistry(client)
+	const accountID int64 = 708
+	writer.Sync(accountID, true, time.Time{})
+	observer.Sync(accountID, true, time.Time{})
+
+	_, err := writer.Execute(accountID, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+		return okResponse("ok"), nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, AlgorithmBrotli, observer.SettledAlgorithm(context.Background(), accountID))
+
+	// Simulate another instance publishing a replacement and then clearing it.
+	// Administrative display reads must not keep returning the observer's first
+	// process-local snapshot after the shared value has moved on.
+	require.NoError(t, server.Set(sharedAlgorithmKey(accountID), string(AlgorithmZstd)))
+	require.Equal(t, AlgorithmZstd, observer.SettledAlgorithm(context.Background(), accountID))
+	require.NoError(t, client.Del(context.Background(), sharedAlgorithmKey(accountID)).Err())
+	require.Equal(t, AlgorithmNone, observer.SettledAlgorithm(context.Background(), accountID))
+}
+
 func TestRegistryRetiresSharedAlgorithmAndPublishesReplacement(t *testing.T) {
 	server, client := sharedTestRedis(t)
 	first := sharedTestRegistry(client)

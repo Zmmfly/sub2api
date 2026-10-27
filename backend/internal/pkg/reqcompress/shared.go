@@ -7,11 +7,15 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
-const sharedAlgorithmKeyPrefix = "reqcompress:account:"
+const (
+	sharedAlgorithmKeyPrefix = "reqcompress:account:"
+	sharedStateWriteTimeout  = 5 * time.Second
+)
 
 var deleteSharedAlgorithmIfMatches = redis.NewScript(`
 if redis.call('GET', KEYS[1]) == ARGV[1] then
@@ -27,9 +31,10 @@ func ConfigureRedis(client *redis.Client) {
 	defaultRegistry.SetRedis(client)
 }
 
-// SetRedis attaches this registry to the shared negotiation store. Registries
-// keep their negotiated state in memory for the hot path; Redis is read only
-// while initializing an account and written only after a state transition.
+// SetRedis attaches this registry to the shared negotiation store. The request
+// hot path keeps negotiated state in memory and reads Redis only while
+// initializing an account; administrative display reads use the latest shared
+// snapshot, and writes follow state transitions.
 func (r *Registry) SetRedis(client *redis.Client) {
 	if r == nil {
 		return
@@ -64,8 +69,9 @@ func parseSharedAlgorithm(raw string) (Algorithm, bool) {
 
 // hydrateShared initializes one account from Redis. Holding the state lock
 // across the read prevents a concurrent local trial from racing the snapshot.
-// A failed read is retried on a later initialization attempt; it never blocks
-// the upstream request from falling back to the normal negotiation flow.
+// A failed read is retried on a later initialization attempt; the caller sends
+// identity in the meantime instead of restarting negotiation with stale or
+// unknown shared state.
 func (r *Registry) hydrateShared(ctx context.Context, accountID int64, negotiation *state) error {
 	client := r.sharedRedis()
 	if client == nil || negotiation == nil {
@@ -89,12 +95,12 @@ func (r *Registry) hydrateShared(ctx context.Context, accountID int64, negotiati
 	if err != nil {
 		return err
 	}
-	negotiation.sharedLoaded = true
 	algorithm, ok := parseSharedAlgorithm(raw)
 	if !ok {
 		return fmt.Errorf("invalid shared request compression algorithm %q", raw)
 	}
 
+	negotiation.sharedLoaded = true
 	negotiation.current = algorithm
 	negotiation.tested = true
 	negotiation.negotiating = false
@@ -102,14 +108,22 @@ func (r *Registry) hydrateShared(ctx context.Context, accountID int64, negotiati
 	return nil
 }
 
+func sharedWriteContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// The upstream request may be canceled immediately after a successful
+	// response. Shared state must still reflect that completed negotiation.
+	return context.WithTimeout(context.WithoutCancel(ctx), sharedStateWriteTimeout)
+}
+
 func (r *Registry) persistSharedAlgorithm(ctx context.Context, accountID int64, algorithm Algorithm) {
 	client := r.sharedRedis()
 	if client == nil || algorithm == AlgorithmNone {
 		return
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx, cancel := sharedWriteContext(ctx)
+	defer cancel()
 
 	// Do not let a request that finishes after an administrative disable/reset
 	// resurrect its old result. The slot lock orders this check and write with
@@ -142,9 +156,8 @@ func (r *Registry) deleteSharedAlgorithm(ctx context.Context, accountID int64, e
 	if client == nil {
 		return
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx, cancel := sharedWriteContext(ctx)
+	defer cancel()
 	var err error
 	if expected == AlgorithmNone {
 		err = client.Del(ctx, sharedAlgorithmKey(accountID)).Err()
@@ -181,14 +194,15 @@ func (r *Registry) Reset(ctx context.Context, accountID int64) {
 	r.deleteSharedAlgorithm(ctx, accountID, AlgorithmNone)
 }
 
-// SettledAlgorithm returns the currently pinned coding, if any. The first read
-// for an enabled account hydrates it from Redis so a new process can reuse an
-// existing negotiation instead of probing every account again.
+// SettledAlgorithm returns the currently pinned coding, if any. Administrative
+// responses use this read-only view rather than changing the request hot path.
 func SettledAlgorithm(ctx context.Context, accountID int64) Algorithm {
 	return defaultRegistry.SettledAlgorithm(ctx, accountID)
 }
 
-// SettledAlgorithm returns the currently pinned coding in this registry.
+// SettledAlgorithm returns the latest shared coding for administrative display.
+// Reading Redis on each call keeps list refreshes consistent across instances;
+// process-local state remains the fallback for memory-only mode and Redis errors.
 func (r *Registry) SettledAlgorithm(ctx context.Context, accountID int64) Algorithm {
 	slot := r.existingSlot(accountID)
 	if slot == nil {
@@ -198,8 +212,26 @@ func (r *Registry) SettledAlgorithm(ctx context.Context, accountID int64) Algori
 	if negotiation == nil {
 		return AlgorithmNone
 	}
-	if err := r.hydrateShared(ctx, accountID, negotiation); err != nil {
-		slog.Warn("reqcompress shared state load failed", "account_id", accountID, "error", err)
+	client := r.sharedRedis()
+	if client == nil {
+		return negotiation.settledAlgorithm()
 	}
-	return negotiation.settledAlgorithm()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	raw, err := client.Get(ctx, sharedAlgorithmKey(accountID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return AlgorithmNone
+	}
+	if err != nil {
+		slog.Warn("reqcompress shared state load failed", "account_id", accountID, "error", err)
+		return negotiation.settledAlgorithm()
+	}
+	algorithm, ok := parseSharedAlgorithm(raw)
+	if !ok {
+		slog.Warn("reqcompress shared state load failed", "account_id", accountID,
+			"error", fmt.Errorf("invalid shared request compression algorithm %q", raw))
+		return negotiation.settledAlgorithm()
+	}
+	return algorithm
 }

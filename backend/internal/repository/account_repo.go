@@ -1177,6 +1177,9 @@ func (r *accountRepository) ListOpsAccountsForStats(ctx context.Context, platfor
 	}
 
 	accounts, err := q.
+		// Keep updated_at out of this projection unless compress_request_enabled
+		// is selected too: accountEntityToService treats a row with updated_at as
+		// a full observation of the request-compression switch.
 		Select(
 			dbaccount.FieldID,
 			dbaccount.FieldName,
@@ -3671,7 +3674,16 @@ func accountEntityToService(m *dbent.Account) *service.Account {
 	}
 
 	rateMultiplier := m.RateMultiplier
-	compressRequestEnabled := m.CompressRequestEnabled
+	// A column projection, such as the ops statistics read, leaves every
+	// unselected field at its zero value. updated_at is written on every create
+	// and update, so a row without it cannot report the compression switch: its
+	// false compress_request_enabled means "not loaded", not "off".
+	compressionObserved := !m.UpdatedAt.IsZero()
+	var compressRequestEnabled *bool
+	if compressionObserved {
+		enabled := m.CompressRequestEnabled
+		compressRequestEnabled = &enabled
+	}
 
 	account := &service.Account{
 		ID:                      m.ID,
@@ -3692,7 +3704,7 @@ func accountEntityToService(m *dbent.Account) *service.Account {
 		LastUsedAt:              m.LastUsedAt,
 		ExpiresAt:               m.ExpiresAt,
 		AutoPauseOnExpired:      m.AutoPauseOnExpired,
-		CompressRequestEnabled:  &compressRequestEnabled,
+		CompressRequestEnabled:  compressRequestEnabled,
 		CreatedAt:               m.CreatedAt,
 		UpdatedAt:               m.UpdatedAt,
 		Schedulable:             m.Schedulable,
@@ -3707,15 +3719,14 @@ func accountEntityToService(m *dbent.Account) *service.Account {
 		ParentAccountID:         m.ParentAccountID,
 		QuotaDimension:          string(m.QuotaDimension),
 	}
-	// Every database read refreshes the process-local compression registry.
+	// Every full-row read refreshes the process-local compression registry.
 	// The row's updated_at orders this observation against concurrent admin
-	// edits and lagging scheduler-cache payloads. A missing value stays unknown
-	// instead of reading as "off": dropping the negotiated state here would make
-	// every request probe the upstream again.
-	if account.CompressRequestEnabled != nil {
-		reqcompress.SyncAccount(account.ID, *account.CompressRequestEnabled, account.UpdatedAt)
-	} else {
-		reqcompress.SyncAccountUnknown(account.ID, account.UpdatedAt)
+	// edits and lagging scheduler-cache payloads. A projected row is not an
+	// observation at all: reading its zero value as "off" would drop the
+	// negotiated state, delete the shared coding for every instance, and make
+	// the next request probe the upstream again.
+	if compressionObserved {
+		reqcompress.SyncAccount(account.ID, m.CompressRequestEnabled, account.UpdatedAt)
 	}
 	return account
 }

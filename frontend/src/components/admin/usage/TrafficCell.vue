@@ -1,18 +1,18 @@
 <template>
   <!--
-    One shared grid holds the label and every measurement part of every line, so the
-    request and response byte values form right-aligned numeric columns that line up
-    vertically across the upstream/downstream lines. A line without a compression rate
-    leaves that track empty instead of shifting the response column. The row and
-    measurement wrappers stay grouped in the DOM (and keep their test ids) through
-    `display: contents`.
+    One shared grid holds the optional admin label and every measurement part of every
+    line, so request and response byte values form right-aligned numeric columns. User
+    rows omit the visible label; their direction icons retain the full client direction
+    as hover and accessibility text. A line without a compression rate leaves that track
+    empty instead of shifting the response column. The wrappers stay grouped in the DOM
+    (and keep their test ids) through `display: contents`.
   -->
   <div
     data-testid="traffic-cell"
     class="grid items-center gap-x-1 gap-y-1 text-xs"
     :class="showUpstream
       ? 'grid-cols-[max-content_max-content_max-content_max-content_max-content_max-content_max-content]'
-      : 'grid-cols-[max-content_max-content_max-content_max-content]'"
+      : 'grid-cols-[max-content_max-content_max-content]'"
     :title="t('usage.traffic.bodyOnlyHint')"
   >
     <div
@@ -21,7 +21,7 @@
       :data-testid="`traffic-${row.key}`"
       class="contents"
     >
-      <span class="pr-2 text-gray-500 dark:text-gray-400">{{ row.label }}</span>
+      <span v-if="showUpstream" class="pr-2 text-gray-500 dark:text-gray-400">{{ row.label }}</span>
       <div
         v-for="(measurement, index) in row.measurements"
         :key="measurement.key"
@@ -130,12 +130,12 @@ const rows = computed<TrafficRow[]>(() => {
     {
       key: 'client-upload',
       label: t('usage.traffic.clientUpload'),
-      measurements: [{ key: 'request', label: t('usage.traffic.request'), value: props.traffic?.downstream?.request }],
+      measurements: [{ key: 'request', label: t('usage.traffic.clientUpload'), value: props.traffic?.downstream?.request }],
     },
     {
       key: 'client-download',
       label: t('usage.traffic.clientDownload'),
-      measurements: [{ key: 'response', label: t('usage.traffic.response'), value: props.traffic?.downstream?.response }],
+      measurements: [{ key: 'response', label: t('usage.traffic.clientDownload'), value: props.traffic?.downstream?.response }],
     },
   ]
 })

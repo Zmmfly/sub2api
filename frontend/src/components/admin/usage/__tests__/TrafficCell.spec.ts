@@ -93,7 +93,8 @@ describe('TrafficCell', () => {
   it.each([true, false])('keeps the byte columns aligned as right-aligned cells in one shared grid (showUpstream=%s)', (showUpstream) => {
     const wrapper = mount(TrafficCell, { props: { traffic, showUpstream } })
     const cell = wrapper.get('[data-testid="traffic-cell"]')
-    const tracks = showUpstream ? 7 : 4
+    const tracks = showUpstream ? 7 : 3
+    const labelTracks = showUpstream ? 1 : 0
 
     // One grid owns every track: the row and measurement wrappers only contribute cells
     // through `display: contents`, so all lines share one set of column widths.
@@ -107,16 +108,19 @@ describe('TrafficCell', () => {
     expect(rows.map(row => row.getAttribute('data-testid'))).toEqual(showUpstream
       ? ['traffic-upstream', 'traffic-downstream']
       : ['traffic-client-upload', 'traffic-client-download'])
-    expect(rows.map(row => row.children[0].textContent)).toEqual(showUpstream
-      ? ['Upstream', 'Downstream']
-      : ['Client upload', 'Client download'])
+    if (showUpstream) {
+      expect(rows.map(row => row.children[0].textContent)).toEqual(['Upstream', 'Downstream'])
+    } else {
+      expect(wrapper.text()).not.toContain('Client upload')
+      expect(wrapper.text()).not.toContain('Client download')
+    }
 
     for (const row of rows) {
-      const measurements = Array.from(row.children).slice(1) as HTMLElement[]
+      const measurements = Array.from(row.children).slice(labelTracks) as HTMLElement[]
       expect(measurements.map(measurement => measurement.className)).toEqual(measurements.map(() => 'contents'))
-      // The label plus three tracks per measurement fills exactly one grid line; a shorter
-      // line would let later cells wrap and lose the column alignment.
-      expect(1 + measurements.length * 3).toBe(tracks)
+      // The optional admin label plus three tracks per measurement fills exactly one grid
+      // line; a shorter line would wrap later cells and lose the column alignment.
+      expect(labelTracks + measurements.length * 3).toBe(tracks)
       for (const measurement of measurements) {
         const [direction, bytes, rate] = Array.from(measurement.children) as HTMLElement[]
         expect([direction, bytes, rate]).toHaveLength(3)
@@ -139,18 +143,24 @@ describe('TrafficCell', () => {
     expect(rateLess.find('[data-testid="traffic-compression"]').exists()).toBe(false)
   })
 
-  it('defaults to two client rows and never renders unexpected upstream data, labels, or attributes', () => {
+  it('defaults to two compact client rows without visible labels or unexpected upstream data', () => {
     const wrapper = mount(TrafficCell, { props: { traffic } })
     const rows = wrapper.get('[data-testid="traffic-cell"]').element.children
     expect(rows).toHaveLength(2)
     expect(rows[0].getAttribute('data-testid')).toBe('traffic-client-upload')
     expect(rows[1].getAttribute('data-testid')).toBe('traffic-client-download')
-    expect(wrapper.get('[data-testid="traffic-client-upload"] > span').text()).toBe('Client upload')
+    expect(wrapper.get('[data-testid="traffic-client-upload"]').text()).not.toContain('Client upload')
     expect(wrapper.get('[data-testid="traffic-client-upload"] [data-testid="traffic-actual"]').text()).toBe('123 B')
-    expect(wrapper.get('[data-testid="traffic-client-upload-request-direction"]').getComponent(Icon).props('name')).toBe('arrowUp')
-    expect(wrapper.get('[data-testid="traffic-client-download"] > span').text()).toBe('Client download')
+    const uploadDirection = wrapper.get('[data-testid="traffic-client-upload-request-direction"]')
+    expect(uploadDirection.attributes('aria-label')).toBe('Client upload')
+    expect(uploadDirection.attributes('title')).toBe('Client upload')
+    expect(uploadDirection.getComponent(Icon).props('name')).toBe('arrowUp')
+    expect(wrapper.get('[data-testid="traffic-client-download"]').text()).not.toContain('Client download')
     expect(wrapper.get('[data-testid="traffic-client-download"] [data-testid="traffic-actual"]').text()).toBe('4 KiB')
-    expect(wrapper.get('[data-testid="traffic-client-download-response-direction"]').getComponent(Icon).props('name')).toBe('arrowDown')
+    const downloadDirection = wrapper.get('[data-testid="traffic-client-download-response-direction"]')
+    expect(downloadDirection.attributes('aria-label')).toBe('Client download')
+    expect(downloadDirection.attributes('title')).toBe('Client download')
+    expect(downloadDirection.getComponent(Icon).props('name')).toBe('arrowDown')
     expect(wrapper.get('[data-testid="traffic-client-download"]').get('[data-testid="traffic-compression"]').text()).toBe('50.0%')
     expect(wrapper.get('[data-testid="traffic-client-download"]').text()).not.toContain('Original 8 KiB')
     expect(textWithoutComments(wrapper.html())).not.toMatch(/upstream|Upstream|2 KiB|1\.5 KiB|-50\.0%/)

@@ -18,6 +18,7 @@ import (
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/reqcompress"
 )
 
 // Account management implementations
@@ -610,6 +611,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			return nil, err
 		}
 	}
+	previousCompressionEnabled := account.RequestCompressionEnabled()
 	previousProbeIdentity := upstreamBillingProbeIdentity(account)
 	previousOllamaUsageIdentity := ollamaCloudUsageIdentity(account)
 	previousOpenCodeUsageIdentity := openCodeGoUsageIdentity(account)
@@ -928,6 +930,12 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	updated, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	if input.CompressRequestEnabled != nil && previousCompressionEnabled != updated.RequestCompressionEnabled() {
+		// A toggle starts a fresh negotiation on every instance. Ordinary account
+		// edits keep the shared result and do not cause another upstream probe.
+		reqcompress.ResetAccount(ctx, id)
+		reqcompress.SyncAccount(updated.ID, updated.RequestCompressionEnabled(), updated.UpdatedAt)
 	}
 	return updated, nil
 }

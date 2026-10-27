@@ -3,25 +3,30 @@
 //
 // Providers accept different subsets of HTTP content codings for request
 // entities. An account that opts in begins with an ordered trial
-// (br -> zstd -> deflate); the first coding the upstream accepts is remembered
-// for the lifetime of the process. A coding the upstream rejects is dropped,
-// and a later rejection of the settled coding degrades the account back to
-// negotiation or identity.
+// (br -> zstd -> deflate) and keeps the first coding the upstream accepts.
+// A coding the upstream rejects is dropped, and a later rejection of the settled
+// coding degrades the account back to negotiation or identity.
 //
-// Only the administrator's on/off switch is persisted. Negotiation results stay
-// in process memory so a restart re-probes instead of trusting a stale answer.
+// The administrator's on/off switch is persisted in the account database row.
+// When Redis is configured, successful codings are also shared without a TTL so
+// other instances and later restarts can reuse them. Local memory remains the
+// hot-path cache; identity is not shared and may be probed again after restart.
 package reqcompress
 
 import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
-// Registry holds the per-account switch and negotiation state for one process.
+// Registry holds the local per-account switch and negotiation cache. The
+// optional shared client is used only to initialize and update negotiated state.
 type Registry struct {
 	mu      sync.RWMutex
 	entries map[int64]*entry
+	shared  *redis.Client
 }
 
 // NewRegistry returns an empty registry.
@@ -96,6 +101,7 @@ func (r *Registry) syncObserved(accountID int64, enabled *bool, updatedAt time.T
 	case "enabled":
 		slog.Debug("reqcompress switch enabled", "account_id", accountID)
 	case "disabled":
+		r.deleteSharedAlgorithm(nil, accountID, AlgorithmNone)
 		slog.Info("reqcompress switch disabled", "account_id", accountID)
 	}
 }

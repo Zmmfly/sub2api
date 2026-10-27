@@ -45,6 +45,9 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 	if negotiation == nil || !Eligible(req) {
 		return send(req)
 	}
+	if err := r.hydrateShared(req.Context(), accountID, negotiation); err != nil {
+		slog.Warn("reqcompress shared state load failed", "account_id", accountID, "error", err)
+	}
 
 	work, ownsNegotiation := negotiation.begin()
 	if len(work) == 0 {
@@ -105,6 +108,7 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 				adoptDeliveredAttempt(req, probe)
 				if ownsNegotiation {
 					negotiation.negotiationSucceeded(algorithm)
+					r.persistSharedAlgorithm(req.Context(), accountID, algorithm)
 					fields := []any{"account_id", accountID, "algorithm", algorithm,
 						"host", logHost(req), "method", req.Method,
 						"original_bytes", originalBytes, "compressed_bytes", attemptedBytes}
@@ -170,6 +174,9 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 					reason = "trial_failed"
 				}
 				if negotiation.pinIdentity() {
+					if !ownsNegotiation {
+						r.deleteSharedAlgorithm(req.Context(), accountID, algorithm)
+					}
 					slog.Warn("reqcompress pinned identity", "account_id", accountID,
 						"algorithm", algorithm, "status", status, "host", logHost(req),
 						"method", req.Method, "reason", reason)
@@ -191,6 +198,7 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 		// The settled coding broke: drop it and, when this request becomes the
 		// owner, try the remaining codings immediately.
 		next, owns := negotiation.retireSettled(algorithm)
+		r.deleteSharedAlgorithm(req.Context(), accountID, algorithm)
 		if !owns {
 			break
 		}

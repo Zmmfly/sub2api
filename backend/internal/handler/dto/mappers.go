@@ -2,10 +2,12 @@
 package dto
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/reqcompress"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/traffic"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
@@ -287,6 +289,7 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		ParentAccountID:         a.ParentAccountID,
 		QuotaDimension:          a.QuotaDimension,
 	}
+	out.CompressRequestAlgorithm = string(reqcompress.SettledAlgorithm(context.Background(), a.ID))
 
 	// 提取 5h 窗口费用控制和会话数量控制配置（仅 Anthropic OAuth/SetupToken 账号有效）
 	if a.IsAnthropicOAuthOrSetupToken() {
@@ -466,7 +469,7 @@ func AccountListItemFromAccount(a *Account) *AccountListItem {
 	if a == nil {
 		return nil
 	}
-	return &AccountListItem{
+	out := &AccountListItem{
 		ID: a.ID, Name: a.Name, Notes: a.Notes, Platform: a.Platform, Type: a.Type,
 		Credentials: a.Credentials, CredentialsStatus: a.CredentialsStatus, Extra: a.Extra,
 		OllamaCloudUsage: a.OllamaCloudUsage, OpenCodeGoUsage: a.OpenCodeGoUsage,
@@ -499,6 +502,8 @@ func AccountListItemFromAccount(a *Account) *AccountListItem {
 		ParentPrivacyMode: a.ParentPrivacyMode, ParentSubscriptionExpiresAt: a.ParentSubscriptionExpiresAt,
 		ParentChatGPTAccountID: a.ParentChatGPTAccountID, Proxy: a.Proxy, GroupIDs: a.GroupIDs,
 	}
+	out.CompressRequestAlgorithm = a.CompressRequestAlgorithm
+	return out
 }
 
 func timeToUnixSeconds(value *time.Time) *int64 {

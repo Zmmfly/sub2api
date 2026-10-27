@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/reqcompress"
 )
 
 type accountRepoStubForCompressRequest struct {
@@ -33,6 +35,7 @@ func TestAdminService_UpdateAccount_CompressRequestSwitch(t *testing.T) {
 		Schedulable: true,
 		Extra:       map[string]any{},
 	}
+	t.Cleanup(func() { reqcompress.ResetAccount(context.Background(), account.ID) })
 	repo := &accountRepoStubForCompressRequest{account: account}
 	svc := &adminServiceImpl{accountRepo: repo}
 
@@ -42,6 +45,7 @@ func TestAdminService_UpdateAccount_CompressRequestSwitch(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, updated.RequestCompressionEnabled())
+	require.True(t, reqcompress.Enabled(account.ID))
 
 	// Omitting the field preserves the stored switch.
 	updated, err = svc.UpdateAccount(context.Background(), account.ID, &UpdateAccountInput{})
@@ -54,6 +58,7 @@ func TestAdminService_UpdateAccount_CompressRequestSwitch(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.False(t, updated.RequestCompressionEnabled())
+	require.False(t, reqcompress.Enabled(account.ID))
 }
 
 func TestBuildAccountForCreate_CompressRequestSwitchDefaultsOff(t *testing.T) {

@@ -207,7 +207,7 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 	account.ID = created.ID
 	account.CreatedAt = created.CreatedAt
 	account.UpdatedAt = created.UpdatedAt
-	// Keep the process-lifetime compression registry in step with the row that
+	// Keep the process-local compression registry in step with the row that
 	// was just written, so an enabled account can compress its next request
 	// without waiting for a read to refresh the registry.
 	reqcompress.SyncAccount(created.ID, created.CompressRequestEnabled, created.UpdatedAt)
@@ -1018,6 +1018,7 @@ func (r *accountRepository) Delete(ctx context.Context, id int64) error {
 		}
 	}
 	r.deleteSchedulerAccountSnapshot(ctx, id)
+	reqcompress.ResetAccount(ctx, id)
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, buildSchedulerGroupPayload(groupIDs)); err != nil {
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue account delete failed: account=%d err=%v", id, err)
 	}
@@ -3706,7 +3707,7 @@ func accountEntityToService(m *dbent.Account) *service.Account {
 		ParentAccountID:         m.ParentAccountID,
 		QuotaDimension:          string(m.QuotaDimension),
 	}
-	// Every database read refreshes the process-lifetime compression registry.
+	// Every database read refreshes the process-local compression registry.
 	// The row's updated_at orders this observation against concurrent admin
 	// edits and lagging scheduler-cache payloads. A missing value stays unknown
 	// instead of reading as "off": dropping the negotiated state here would make

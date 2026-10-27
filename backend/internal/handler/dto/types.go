@@ -239,6 +239,8 @@ type Account struct {
 	CreatedAt               time.Time                      `json:"created_at"`
 	UpdatedAt               time.Time                      `json:"updated_at"`
 
+	CompressRequestAlgorithm string `json:"compress_request_algorithm,omitempty"`
+
 	Schedulable bool `json:"schedulable"`
 
 	RateLimitedAt    *time.Time `json:"rate_limited_at"`
@@ -365,6 +367,8 @@ type AccountListItem struct {
 	CompressRequestEnabled  bool       `json:"compress_request_enabled"`
 	CreatedAt               time.Time  `json:"created_at"`
 	UpdatedAt               time.Time  `json:"updated_at"`
+
+	CompressRequestAlgorithm string `json:"compress_request_algorithm,omitempty"`
 
 	Schedulable bool `json:"schedulable"`
 

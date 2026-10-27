@@ -16,7 +16,7 @@ import (
 // TestSchedulerCachePreservesCompressRequestEnabled pins the account snapshot's
 // explicit field list: the full and metadata payloads must both carry the
 // per-account request compression switch, and decoding either one must refresh
-// the process-lifetime negotiation registry.
+// the process-local negotiation registry.
 func TestSchedulerCachePreservesCompressRequestEnabled(t *testing.T) {
 	const accountID int64 = 9003
 	enabled := true

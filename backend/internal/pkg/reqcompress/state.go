@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// state holds the process-lifetime negotiation result for one opted-in account.
+// state holds the process-local negotiation cache for one opted-in account.
 // A zero-value state has not been negotiated yet and starts with TrialOrder.
 type state struct {
 	mu sync.Mutex
@@ -22,6 +22,9 @@ type state struct {
 	// negotiating is true while one request owns the trial. Concurrent
 	// requests forward identity instead of racing the upstream.
 	negotiating bool
+	// sharedLoaded records that initial shared-state loading has completed or
+	// that a fresher local transition has made a reload unnecessary.
+	sharedLoaded bool
 	// lastFallbackLog rate-limits warning-level fallback logs so a persistent
 	// upstream outage cannot flood the log while Debug still records each event.
 	lastFallbackLog time.Time
@@ -63,6 +66,7 @@ func (s *state) negotiationSucceeded(algorithm Algorithm) {
 	s.current = algorithm
 	s.tested = true
 	s.negotiating = false
+	s.sharedLoaded = true
 	s.remaining = keepFrom(s.remaining, algorithm)
 }
 
@@ -72,6 +76,7 @@ func (s *state) negotiationCandidateFailed(algorithm Algorithm) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.sharedLoaded = true
 	s.remaining = removeAlgorithm(s.remaining, algorithm)
 	if len(s.remaining) == 0 {
 		s.current = AlgorithmNone
@@ -116,6 +121,7 @@ func (s *state) pinIdentity() bool {
 	s.current = AlgorithmNone
 	s.tested = true
 	s.negotiating = false
+	s.sharedLoaded = true
 	s.remaining = nil
 	return true
 }
@@ -132,6 +138,7 @@ func (s *state) retireSettled(algorithm Algorithm) ([]Algorithm, bool) {
 	}
 	s.current = AlgorithmNone
 	s.tested = false
+	s.sharedLoaded = true
 	s.remaining = removeAlgorithm(s.remaining, algorithm)
 	if s.negotiating || len(s.remaining) == 0 {
 		if len(s.remaining) == 0 {
@@ -160,4 +167,16 @@ func removeAlgorithm(list []Algorithm, algorithm Algorithm) []Algorithm {
 		}
 	}
 	return out
+}
+
+func (s *state) settledAlgorithm() Algorithm {
+	if s == nil {
+		return AlgorithmNone
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.tested {
+		return AlgorithmNone
+	}
+	return s.current
 }

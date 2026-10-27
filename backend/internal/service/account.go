@@ -44,7 +44,7 @@ type Account struct {
 	ExpiresAt          *time.Time
 	AutoPauseOnExpired bool
 	// CompressRequestEnabled 表示是否压缩该账号的出站请求体。
-	// 可用的 Content-Encoding 由网关在运行时协商，不随账号持久化。
+	// 可用的 Content-Encoding 由网关在运行时协商；成功结果写入共享 Redis，不写入账号数据库行。
 	// 使用指针用于兼容旧版本调度缓存（Redis）中缺字段的情况：nil 表示未知，
 	// 不能当成“关闭”——否则每次缓存读取都会清掉进程内已完成的压缩协商结果。
 	CompressRequestEnabled *bool

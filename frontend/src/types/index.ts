@@ -947,6 +947,7 @@ export type KnownAccountPlatform = 'anthropic' | 'openai' | 'gemini' | 'antigrav
  */
 export type AccountPlatform = KnownAccountPlatform | (string & {})
 export type AccountType = 'oauth' | 'setup-token' | 'apikey' | 'upstream' | 'bedrock' | 'service_account'
+export type RequestCompressionAlgorithm = 'br' | 'zstd' | 'deflate'
 export type OAuthAddMethod = 'oauth' | 'setup-token'
 export type ProxyProtocol = 'http' | 'https' | 'socks5' | 'socks5h'
 
@@ -1293,6 +1294,8 @@ export interface Account {
   auto_pause_on_expired: boolean
   // 开启后，该账号的出站请求体会按协商结果压缩（br/zstd/deflate）
   compress_request_enabled: boolean
+  // 当前共享协商已钉住的算法；未协商或当前为 identity 时不返回。
+  compress_request_algorithm?: RequestCompressionAlgorithm
   created_at: string
   updated_at: string
   proxy?: Proxy

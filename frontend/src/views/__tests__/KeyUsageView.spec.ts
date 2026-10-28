@@ -1,8 +1,23 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 
 import KeyUsageView from '../KeyUsageView.vue'
+
+enableAutoUnmount(afterEach)
+
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
+  vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) =>
+    window.setTimeout(() => callback(performance.now()), 16)))
+  vi.stubGlobal('cancelAnimationFrame', vi.fn((id: number) => window.clearTimeout(id)))
+})
+
+afterEach(() => {
+  vi.clearAllTimers()
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
+})
 
 const { showInfo, showSuccess, showError, fetchPublicSettings } = vi.hoisted(() => ({
   showInfo: vi.fn(),
@@ -116,7 +131,6 @@ describe('KeyUsageView daily detail', () => {
       configurable: true,
       value: vi.fn().mockReturnValue({ matches: false }),
     })
-    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => window.setTimeout(() => cb(0), 0))
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -168,11 +182,6 @@ describe('KeyUsageView daily detail', () => {
     }))
   })
 
-  afterEach(() => {
-    vi.useRealTimers()
-    vi.unstubAllGlobals()
-  })
-
   it('renders daily usage detail rows after a successful query', async () => {
     const wrapper = mount(KeyUsageView, {
       global: {
@@ -215,7 +224,6 @@ describe('KeyUsageView daily detail', () => {
   })
 
   it('queries the current local calendar date near midnight', async () => {
-    vi.useFakeTimers()
     vi.setSystemTime(new Date(2026, 6, 13, 0, 30))
 
     const wrapper = mount(KeyUsageView, {
@@ -247,7 +255,6 @@ describe('KeyUsageView subscription feature flag', () => {
       configurable: true,
       value: vi.fn().mockReturnValue({ matches: false }),
     })
-    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => window.setTimeout(() => cb(0), 0))
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -268,7 +275,6 @@ describe('KeyUsageView subscription feature flag', () => {
 
   afterEach(() => {
     appStoreState.cachedPublicSettings = null
-    vi.unstubAllGlobals()
   })
 
   async function mountAndQuery() {
@@ -304,5 +310,162 @@ describe('KeyUsageView subscription feature flag', () => {
     expect(wrapper.text()).not.toContain('Subscription Type')
     expect(wrapper.text()).toContain('Wallet Balance')
     wrapper.unmount()
+  })
+})
+
+describe('KeyUsageView ring animation lifecycle', () => {
+  const stages = [
+    { stage: 'the initial frame', elapsed: 0 },
+    { stage: 'the start delay', elapsed: 16 },
+    { stage: 'the percentage animation', elapsed: 82 },
+  ]
+
+  function usageResponse(used = 1) {
+    return new Response(JSON.stringify({
+      mode: 'quota_limited',
+      isValid: true,
+      status: 'active',
+      quota: { limit: 10, used, remaining: 10 - used, unit: 'USD' },
+    }))
+  }
+
+  function deferredResponse() {
+    let resolve!: (response: Response) => void
+    let reject!: (reason: Error) => void
+    const promise = new Promise<Response>((resolveResponse, rejectResponse) => {
+      resolve = resolveResponse
+      reject = rejectResponse
+    })
+    return { promise, resolve, reject }
+  }
+
+  function mountView() {
+    return mount(KeyUsageView, {
+      global: {
+        stubs: {
+          RouterLink: { template: '<a><slot /></a>' },
+          LocaleSwitcher: true,
+          Icon: true,
+        },
+      },
+    })
+  }
+
+  async function query(wrapper: ReturnType<typeof mountView>) {
+    await wrapper.find('input').setValue('sk-test-key')
+    await wrapper.find('input').trigger('keydown.enter')
+    await flushPromises()
+    await nextTick()
+  }
+
+  beforeEach(() => {
+    showSuccess.mockReset()
+    showError.mockReset()
+    localStorage.clear()
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockReturnValue({ matches: false }),
+    })
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => usageResponse()))
+  })
+
+  it.each(stages)('cancels $stage on unmount before globals are restored', async ({ elapsed }) => {
+    const wrapper = mountView()
+    await query(wrapper)
+    await vi.advanceTimersByTimeAsync(elapsed)
+    expect(vi.getTimerCount()).toBe(2) // Refresh interval plus one animation task.
+
+    const requestFrame = vi.mocked(requestAnimationFrame)
+    const frameCount = requestFrame.mock.calls.length
+    wrapper.unmount()
+
+    expect(vi.getTimerCount()).toBe(0)
+    vi.unstubAllGlobals()
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(requestFrame).toHaveBeenCalledTimes(frameCount)
+  })
+
+  it('does not start a queued nextTick animation after unmount', async () => {
+    const wrapper = mountView()
+    // Query success runs synchronously after the animation's nextTick is queued.
+    showSuccess.mockImplementationOnce(() => wrapper.unmount())
+    await query(wrapper)
+
+    expect(showSuccess).toHaveBeenCalledOnce()
+    expect(requestAnimationFrame).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('ignores a query response that arrives after unmount', async () => {
+    const pending = deferredResponse()
+    vi.mocked(fetch).mockReturnValueOnce(pending.promise)
+    const wrapper = mountView()
+    await query(wrapper)
+    wrapper.unmount()
+
+    pending.resolve(usageResponse())
+    await flushPromises()
+    await nextTick()
+
+    expect(requestAnimationFrame).not.toHaveBeenCalled()
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(showError).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('ignores a query failure that arrives after unmount', async () => {
+    const pending = deferredResponse()
+    vi.mocked(fetch).mockReturnValueOnce(pending.promise)
+    const wrapper = mountView()
+    await query(wrapper)
+    wrapper.unmount()
+
+    pending.reject(new Error('request failed after unmount'))
+    await flushPromises()
+
+    expect(showError).not.toHaveBeenCalled()
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(requestAnimationFrame).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each(stages)('cancels $stage when a new query starts', async ({ elapsed }) => {
+    const wrapper = mountView()
+    await query(wrapper)
+    await vi.advanceTimersByTimeAsync(elapsed)
+    const requestFrame = vi.mocked(requestAnimationFrame)
+    const obsoleteFrame = requestFrame.mock.calls.at(-1)![0]
+    const pending = deferredResponse()
+    vi.mocked(fetch).mockReturnValueOnce(pending.promise)
+
+    await query(wrapper)
+    expect(vi.getTimerCount()).toBe(1) // Only the refresh interval remains.
+    const frameCount = requestFrame.mock.calls.length
+    // Even an already-delivered callback must not restart the obsolete animation.
+    obsoleteFrame(performance.now())
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(requestFrame).toHaveBeenCalledTimes(frameCount)
+    expect(vi.getTimerCount()).toBe(1)
+
+    pending.resolve(usageResponse(8))
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.find('.text-3xl.tabular-nums').text()).toBe('0%')
+    await vi.advanceTimersByTimeAsync(1200)
+    expect(wrapper.find('.text-3xl.tabular-nums').text()).toBe('80%')
+    expect(vi.getTimerCount()).toBe(1)
+  })
+
+  it('finishes the percentage animation without leaving animation tasks', async () => {
+    const wrapper = mountView()
+    await query(wrapper)
+    expect(wrapper.find('.text-3xl.tabular-nums').text()).toBe('0%')
+
+    await vi.advanceTimersByTimeAsync(1200)
+
+    expect(wrapper.find('.text-3xl.tabular-nums').text()).toBe('10%')
+    expect(vi.getTimerCount()).toBe(1)
+    wrapper.unmount()
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

@@ -417,7 +417,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores'
 import { FeatureFlags, resolveFeatureFlag } from '@/utils/featureFlags'
@@ -462,6 +462,7 @@ const showDatePicker = ref(false)
 const resultData = ref<any>(null)
 const now = ref(new Date())
 let resetTimer: ReturnType<typeof setInterval> | null = null
+let isDisposed = false
 
 // ==================== Date Range State ====================
 
@@ -537,6 +538,9 @@ const RING_GRADIENTS = [
 
 const ringAnimated = ref(false)
 const displayPcts = ref<number[]>([])
+let ringAnimationFrame: number | null = null
+let ringAnimationTimer: ReturnType<typeof setTimeout> | null = null
+let ringAnimationGeneration = 0
 
 const ringTrackColor = computed(() => isDark.value ? '#222222' : '#F0F0EE')
 
@@ -555,13 +559,35 @@ function getRingOffset(ring: RingItem): number {
   return CIRCUMFERENCE - (Math.min(ring.pct, 100) / 100) * CIRCUMFERENCE
 }
 
+function cancelRingAnimation() {
+  // Invalidate nextTick and any callbacks that were already queued for delivery.
+  ringAnimationGeneration += 1
+  if (ringAnimationFrame !== null) {
+    cancelAnimationFrame(ringAnimationFrame)
+    ringAnimationFrame = null
+  }
+  if (ringAnimationTimer !== null) {
+    clearTimeout(ringAnimationTimer)
+    ringAnimationTimer = null
+  }
+}
+
 function triggerRingAnimation(items: RingItem[]) {
+  cancelRingAnimation()
+  if (isDisposed) return
+  const generation = ringAnimationGeneration
+  const isCurrent = () => !isDisposed && generation === ringAnimationGeneration
   ringAnimated.value = false
   displayPcts.value = items.map(() => 0)
 
   nextTick(() => {
-    requestAnimationFrame(() => {
-      setTimeout(() => {
+    if (!isCurrent()) return
+    ringAnimationFrame = requestAnimationFrame(() => {
+      if (!isCurrent()) return
+      ringAnimationFrame = null
+      ringAnimationTimer = setTimeout(() => {
+        if (!isCurrent()) return
+        ringAnimationTimer = null
         ringAnimated.value = true
 
         // Animate percentage numbers
@@ -570,13 +596,15 @@ function triggerRingAnimation(items: RingItem[]) {
         const targets = items.map(item => item.isBalance ? 0 : item.pct)
 
         function tick() {
+          if (!isCurrent()) return
+          ringAnimationFrame = null
           const elapsed = performance.now() - startTime
           const p = Math.min(elapsed / duration, 1)
           const ease = 1 - Math.pow(1 - p, 3)
           displayPcts.value = targets.map(target => Math.round(ease * target))
-          if (p < 1) requestAnimationFrame(tick)
+          if (p < 1) ringAnimationFrame = requestAnimationFrame(tick)
         }
-        requestAnimationFrame(tick)
+        ringAnimationFrame = requestAnimationFrame(tick)
       }, 50)
     })
   })
@@ -875,13 +903,14 @@ async function fetchUsage(key: string) {
 }
 
 async function queryKey() {
-  if (isQuerying.value) return
+  if (isDisposed || isQuerying.value) return
   const key = apiKey.value.trim()
   if (!key) {
     appStore.showInfo(t('keyUsage.enterApiKey'))
     return
   }
 
+  cancelRingAnimation()
   isQuerying.value = true
   showResults.value = true
   showLoading.value = true
@@ -889,22 +918,21 @@ async function queryKey() {
 
   try {
     const data = await fetchUsage(key)
+    if (isDisposed) return
     resultData.value = data
     showLoading.value = false
     showDatePicker.value = true
 
-    // Trigger ring animations after DOM update
-    nextTick(() => {
-      triggerRingAnimation(ringItems.value)
-    })
+    triggerRingAnimation(ringItems.value)
 
     appStore.showSuccess(t('keyUsage.querySuccess'))
   } catch (err) {
+    if (isDisposed) return
     showResults.value = false
     showLoading.value = false
     appStore.showError((err as Error).message || t('keyUsage.queryFailedRetry'))
   } finally {
-    isQuerying.value = false
+    if (!isDisposed) isQuerying.value = false
   }
 }
 
@@ -938,7 +966,9 @@ onMounted(() => {
   resetTimer = setInterval(() => { now.value = new Date() }, 60000)
 })
 
-onUnmounted(() => {
+onBeforeUnmount(() => {
+  isDisposed = true
+  cancelRingAnimation()
   if (resetTimer) clearInterval(resetTimer)
 })
 </script>

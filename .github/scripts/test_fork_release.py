@@ -66,50 +66,37 @@ class AllocationTests(unittest.TestCase):
 
 
 class ReleaseLookupTests(unittest.TestCase):
-    # Minimal shape confirmed against authenticated GET /releases on the failed
-    # z0.2.19-1 draft: REST tag lookup returns 404 while this collection includes it.
-    draft = {'id': 427532134, 'tag_name': TAG, 'draft': True,
-             'prerelease': False, 'assets': [], 'published_at': None}
+    view = {'tagName': TAG, 'isDraft': True, 'isPrerelease': False, 'assets': []}
 
-    def lookup(self, pages):
-        response = subprocess.CompletedProcess([], 0, json.dumps(pages), '')
+    def test_actual_cli_draft_schema_normalized(self):
+        response = subprocess.CompletedProcess([], 0, json.dumps(self.view), '')
         with patch.object(release.subprocess, 'run', return_value=response) as run:
-            result = release.release_info('example/sub2api', TAG)
-        self.assertEqual(run.call_args.args[0],
-                         ['gh', 'api', '--paginate', '--slurp', 'repos/example/sub2api/releases?per_page=100'])
-        return result
+            self.assertEqual(release.release_info('example/sub2api', TAG),
+                             {'tag_name': TAG, 'draft': True, 'prerelease': False, 'assets': []})
+        self.assertEqual(run.call_args.args[0], ['gh', 'release', 'view', TAG, '--repo',
+                         'example/sub2api', '--json', 'tagName,isDraft,isPrerelease,assets'])
 
-    def test_empty_draft_is_visible_without_by_tag_request(self):
-        self.assertEqual(self.lookup([[self.draft]]), self.draft)
-
-    def test_exact_tag_on_later_page(self):
-        other = dict(self.draft, tag_name=TAG + '0')
-        self.assertEqual(self.lookup([[other], [self.draft]]), self.draft)
-
-    def test_published_release_uses_same_shape(self):
-        published = dict(self.draft, draft=False, published_at='2026-10-29T00:00:00Z')
-        self.assertEqual(self.lookup([[published]]), published)
-
-    def test_missing_tag_requires_successful_complete_collection(self):
-        self.assertIsNone(self.lookup([[]]))
-        self.assertIsNone(self.lookup([[dict(self.draft, tag_name='z0.2.19-2')]]))
-
-    def test_duplicate_tag_across_pages_rejected(self):
-        with self.assertRaisesRegex(ValueError, 'multiple releases'):
-            self.lookup([[self.draft], [dict(self.draft, id=2)]])
+    def test_only_exact_cli_notfound_means_absent(self):
+        response = subprocess.CompletedProcess([], 1, '', 'release not found\n')
+        with patch.object(release.subprocess, 'run', return_value=response):
+            self.assertIsNone(release.release_info('example/sub2api', TAG))
 
     def test_access_network_and_server_errors_never_mean_absent(self):
         for error in ['gh: Not Found (HTTP 404)', 'gh: Bad credentials (HTTP 401)',
-                      'gh: Forbidden (HTTP 403)', 'dial tcp: network unreachable', 'HTTP 503']:
+                      'gh: Forbidden (HTTP 403)', 'dial tcp: network unreachable', 'HTTP 503',
+                      'release not found: HTTP 403']:
             response = subprocess.CompletedProcess([], 1, '', error)
             with self.subTest(error=error), patch.object(release.subprocess, 'run', return_value=response):
-                with self.assertRaisesRegex(RuntimeError, 'cannot list releases'):
+                with self.assertRaisesRegex(RuntimeError, 'cannot read release'):
                     release.release_info('example/sub2api', TAG)
 
-    def test_malformed_collection_rejected(self):
-        for data in [{}, [self.draft], [[None]], [[{}]]]:
-            with self.subTest(data=data), self.assertRaises(ValueError):
-                self.lookup(data)
+    def test_malformed_or_wrong_tag_rejected(self):
+        for data in [{}, [], dict(self.view, tagName='z0.2.19-2'),
+                     dict(self.view, assets=[{'name': 'checksums.txt'}])]:
+            response = subprocess.CompletedProcess([], 0, json.dumps(data), '')
+            with self.subTest(data=data), patch.object(release.subprocess, 'run', return_value=response):
+                with self.assertRaises(ValueError):
+                    release.release_info('example/sub2api', TAG)
 
 
 class PublishTests(unittest.TestCase):
@@ -120,6 +107,13 @@ class PublishTests(unittest.TestCase):
         self.archive = self.directory / f'sub2api_{TAG}_linux_amd64.tar.gz'
         for name in release.expected_archives(TAG):
             (self.directory / name).write_bytes(b'archive fixture ' + name.encode())
+        self.now = 0
+        def sleep(seconds):
+            self.now += seconds
+        for target, replacement in [('monotonic', lambda: self.now), ('sleep', sleep)]:
+            clock = patch.object(release.time, target, side_effect=replacement)
+            clock.start()
+            self.addCleanup(clock.stop)
         self.args = argparse.Namespace(tag=TAG, sha=SHA, input=self.temp.name, latest=False)
         self.env = patch.dict(os.environ, {'GITHUB_REPOSITORY': 'example/sub2api'})
         self.env.start()
@@ -146,10 +140,12 @@ class PublishTests(unittest.TestCase):
 
     def test_publish_new_draft_without_clobber(self):
         final = self.info(False, [{'name': name} for name in release.expected_archives(TAG) | {'checksums.txt'}])
-        responses = [subprocess.CompletedProcess([], 0, json.dumps(pages), '')
-                     for pages in [[[]], [[self.info()]], [[final]]]]
-        # Exercise real release_info through create -> collection-visible draft ->
-        # uploaded assets -> published collection result, not a mocked lookup.
+        responses = [subprocess.CompletedProcess([], 1, '', 'release not found\n')]
+        for info in [self.info(), final]:
+            data = {'tagName': info['tag_name'], 'isDraft': info['draft'],
+                    'isPrerelease': info['prerelease'],
+                    'assets': [dict(asset, size=1) for asset in info['assets']]}
+            responses.append(subprocess.CompletedProcess([], 0, json.dumps(data), ''))
         with patch.object(release.subprocess, 'run', side_effect=responses), patch.object(release, 'run', return_value=SHA) as run:
             release.publish(self.args)
         calls = [call.args for call in run.call_args_list]
@@ -158,17 +154,48 @@ class PublishTests(unittest.TestCase):
         self.assertFalse(any('--clobber' in call or 'delete' in call for call in calls))
 
     def test_draft_visibility_failure_is_explicit_and_does_not_upload(self):
-        with patch.object(release, 'release_info', side_effect=[None, None]), patch.object(release, 'run', return_value=SHA) as run:
-            with self.assertRaisesRegex(RuntimeError, 'created draft is not visible'):
+        with patch.object(release, 'release_info', return_value=None), patch.object(release, 'run', return_value=SHA) as run:
+            with self.assertRaisesRegex(RuntimeError, 'created draft metadata did not converge'):
                 release.publish(self.args)
         calls = [call.args for call in run.call_args_list]
         self.assertEqual(sum(call[1:3] == ('release', 'create') for call in calls), 1)
         self.assertFalse(any(call[1:3] in [('release', 'upload'), ('release', 'edit')] for call in calls))
 
     def test_publish_verifies_final_visibility_without_none_crash(self):
-        with patch.object(release, 'release_info', side_effect=[self.info(), None]), patch.object(release, 'run', return_value=SHA):
-            with self.assertRaisesRegex(ValueError, 'publication verification failed'):
+        with patch.object(release, 'release_info', side_effect=[self.info()] + [None] * 30), patch.object(release, 'run', return_value=SHA):
+            with self.assertRaisesRegex(RuntimeError, 'published release metadata did not converge'):
                 release.publish(self.args)
+
+    def test_create_and_publish_metadata_propagation_polls_reads_only(self):
+        names = [{'name': name} for name in release.expected_archives(TAG) | {'checksums.txt'}]
+        final = self.info(False, names)
+        observations = [None, None, None, None, self.info(),  # initial missing, then 3 stale reads
+                        None, self.info(True, names), self.info(False), final]
+        with patch.object(release, 'release_info', side_effect=observations), patch.object(release, 'run', return_value=SHA) as run:
+            release.publish(self.args)
+        calls = [call.args for call in run.call_args_list]
+        self.assertEqual(sum(call[1:3] == ('release', 'create') for call in calls), 1)
+        self.assertEqual(sum(call[1:3] == ('release', 'edit') for call in calls), 1)
+        self.assertEqual(sum(call[1:3] == ('release', 'upload') for call in calls), 6)
+        self.assertGreater(self.now, 0)
+
+    def test_initial_auth_failure_never_creates_release(self):
+        with patch.object(release, 'release_info', side_effect=RuntimeError('HTTP 403')), patch.object(release, 'run', return_value=SHA) as run:
+            with self.assertRaisesRegex(RuntimeError, '403'):
+                release.publish(self.args)
+        self.assertEqual(len(run.call_args_list), 1)  # read-only git tag verification
+
+    def test_poll_auth_failure_does_not_recreate(self):
+        with patch.object(release, 'release_info', side_effect=[None, RuntimeError('HTTP 403')]), patch.object(release, 'run', return_value=SHA) as run:
+            with self.assertRaisesRegex(RuntimeError, '403'):
+                release.publish(self.args)
+        self.assertEqual(sum(call.args[1:3] == ('release', 'create') for call in run.call_args_list), 1)
+
+    def test_visibility_timeout_polls_for_full_budget(self):
+        with patch.object(release, 'release_info', return_value=None), patch.object(release, 'run', return_value=SHA):
+            with self.assertRaisesRegex(RuntimeError, '180s'):
+                release.publish(self.args)
+        self.assertEqual(self.now, 180)
 
     def test_published_missing_asset_is_not_modified(self):
         with patch.object(release, 'release_info', return_value=self.info(False)), patch.object(release, 'run', return_value=SHA) as run:

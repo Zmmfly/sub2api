@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 
 TAG = re.compile(r'z(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-([1-9]\d*)')
 BASE = re.compile(r'(?:v)?((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))')
@@ -120,28 +121,44 @@ def prepare_assets(directory, tag, sha):
 
 
 def release_info(repo, tag):
-    # The REST by-tag endpoint resolves published releases only. The authenticated
-    # collection also exposes drafts by pending tag_name (including empty drafts).
-    # Slurp every page before choosing an exact match; ambiguity must fail closed.
-    result = subprocess.run(['gh', 'api', '--paginate', '--slurp',
-                             f'repos/{repo}/releases?per_page=100'],
+    # gh release view performs both published-tag and draft-pending-tag lookup.
+    # This is the same lookup used by gh release upload/edit below.
+    result = subprocess.run(['gh', 'release', 'view', tag, '--repo', repo,
+                             '--json', 'tagName,isDraft,isPrerelease,assets'],
                             text=True, capture_output=True)
     if result.returncode:
-        # A collection 404 is an access/repository error, NOT a missing release.
-        raise RuntimeError('cannot list releases: ' + result.stderr.strip())
-    pages = json.loads(result.stdout)
-    if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
-        raise ValueError('invalid paginated release response')
-    matches = []
-    for page in pages:
-        for item in page:
-            if not isinstance(item, dict) or not isinstance(item.get('tag_name'), str):
-                raise ValueError('invalid release in collection response')
-            if item['tag_name'] == tag:
-                matches.append(item)
-    if len(matches) > 1:
-        raise ValueError('multiple releases identify the selected tag; refusing ambiguity')
-    return matches[0] if matches else None
+        if result.stderr.strip() == 'release not found':
+            return None
+        raise RuntimeError('cannot read release: ' + result.stderr.strip())
+    data = json.loads(result.stdout)
+    if (not isinstance(data, dict) or data.get('tagName') != tag
+            or not isinstance(data.get('isDraft'), bool)
+            or not isinstance(data.get('isPrerelease'), bool)
+            or not isinstance(data.get('assets'), list)):
+        raise ValueError('invalid release view response')
+    for asset in data['assets']:
+        if (not isinstance(asset, dict) or not isinstance(asset.get('name'), str)
+                or not isinstance(asset.get('size'), int)):
+            raise ValueError('invalid release asset response')
+    return {'tag_name': data['tagName'], 'draft': data['isDraft'],
+            'prerelease': data['isPrerelease'], 'assets': data['assets']}
+
+
+def wait_for_release(repo, tag, ready, phase, timeout=180):
+    # Metadata reads can lag successful create/edit writes. Poll READS only:
+    # never recreate a draft or repeat publication to resolve stale metadata.
+    deadline = time.monotonic() + timeout
+    delay = 2
+    while True:
+        info = release_info(repo, tag)
+        if info is not None and ready(info):
+            return info
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(f'{phase} metadata did not converge within {timeout}s; '
+                               'existing release preserved; retry after inspecting it')
+        time.sleep(min(delay, remaining))
+        delay = min(delay * 2, 15)
 
 
 def publish(args):
@@ -156,9 +173,7 @@ def publish(args):
         run('gh', 'release', 'create', args.tag, '--repo', repo, '--verify-tag', '--draft',
             '--title', f'Sub2API {args.tag}', '--notes',
             f'Fork release of https://github.com/{repo}/commit/{args.sha}.\n\nBased on Wei-Shaw/sub2api; original source attribution and license are retained.')
-        info = release_info(repo, args.tag)
-        if info is None:
-            raise RuntimeError('created draft is not visible yet; retry after checking the existing draft')
+        info = wait_for_release(repo, args.tag, lambda item: True, 'created draft')
     if info['tag_name'] != args.tag:
         raise ValueError('release tag mismatch')
     existing = {asset['name'] for asset in info['assets']}
@@ -181,9 +196,10 @@ def publish(args):
         return
     run('gh', 'release', 'edit', args.tag, '--repo', repo, '--draft=false', '--prerelease=false',
         '--latest=' + str(args.latest).lower())
-    final = release_info(repo, args.tag)
-    if final is None or final['draft'] or final['prerelease'] or not set(assets).issubset({a['name'] for a in final['assets']}):
-        raise ValueError('release publication verification failed')
+    wait_for_release(repo, args.tag,
+                     lambda item: (not item['draft'] and not item['prerelease']
+                                   and set(assets).issubset({a['name'] for a in item['assets']})),
+                     'published release')
     print('Published stable fork release ' + args.tag)
 
 

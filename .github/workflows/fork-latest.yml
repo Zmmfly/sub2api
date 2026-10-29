@@ -1,0 +1,25 @@
+name: Traffic-stat push and manual build
+on:
+  push:
+    branches: [dev/traffic-stat]
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || 'dev/traffic-stat' }}
+          persist-credentials: false
+      - id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  build:
+    needs: resolve
+    uses: ./.github/workflows/fork-build.yml
+    with:
+      source_sha: ${{ needs.resolve.outputs.sha }}

@@ -6,6 +6,9 @@ registries=("ghcr.io/${owner,,}/sub2api")
 if [[ ${SIMPLE_RELEASE:-false} != true && ${DOCKERHUB_USERNAME:-skip} != skip ]]; then
   registries+=("${DOCKERHUB_USERNAME}/sub2api")
 fi
+# This fork reserves :latest for dev/traffic-stat; releases keep version tags.
+publish_latest=true
+if [[ "${GITHUB_REPOSITORY,,}" == zmmfly/sub2api ]]; then publish_latest=false; fi
 arches=(amd64 arm64)
 if [[ ${SIMPLE_RELEASE:-false} == true ]]; then arches=(amd64); fi
 for arch in "${arches[@]}"; do
@@ -16,7 +19,8 @@ for arch in "${arches[@]}"; do
   for registry in "${registries[@]}"; do
     args+=(--tag "$registry:$RELEASE_VERSION-$arch")
     if [[ ${SIMPLE_RELEASE:-false} == true ]]; then
-      args+=(--tag "$registry:$RELEASE_VERSION" --tag "$registry:latest")
+      args+=(--tag "$registry:$RELEASE_VERSION")
+      if [[ "$publish_latest" == true ]]; then args+=(--tag "$registry:latest"); fi
     fi
   done
   if [[ ${DRY_RUN:-false} == true ]]; then
@@ -30,8 +34,10 @@ if [[ ${DRY_RUN:-false} != true && ${SIMPLE_RELEASE:-false} != true ]]; then
   major=${RELEASE_VERSION%%.*}
   minor=${RELEASE_VERSION#*.}; minor=${minor%%.*}
   for registry in "${registries[@]}"; do
-    docker buildx imagetools create \
-      --tag "$registry:$RELEASE_VERSION" --tag "$registry:latest" \
+    latest_args=()
+    if [[ "$publish_latest" == true ]]; then latest_args+=(--tag "$registry:latest"); fi
+    docker buildx imagetools create "${latest_args[@]}" \
+      --tag "$registry:$RELEASE_VERSION" \
       --tag "$registry:$major.$minor" --tag "$registry:$major" \
       "$registry:$RELEASE_VERSION-amd64" "$registry:$RELEASE_VERSION-arm64"
   done

@@ -65,6 +65,53 @@ class AllocationTests(unittest.TestCase):
                 os.chdir(previous)
 
 
+class ReleaseLookupTests(unittest.TestCase):
+    # Minimal shape confirmed against authenticated GET /releases on the failed
+    # z0.2.19-1 draft: REST tag lookup returns 404 while this collection includes it.
+    draft = {'id': 427532134, 'tag_name': TAG, 'draft': True,
+             'prerelease': False, 'assets': [], 'published_at': None}
+
+    def lookup(self, pages):
+        response = subprocess.CompletedProcess([], 0, json.dumps(pages), '')
+        with patch.object(release.subprocess, 'run', return_value=response) as run:
+            result = release.release_info('example/sub2api', TAG)
+        self.assertEqual(run.call_args.args[0],
+                         ['gh', 'api', '--paginate', '--slurp', 'repos/example/sub2api/releases?per_page=100'])
+        return result
+
+    def test_empty_draft_is_visible_without_by_tag_request(self):
+        self.assertEqual(self.lookup([[self.draft]]), self.draft)
+
+    def test_exact_tag_on_later_page(self):
+        other = dict(self.draft, tag_name=TAG + '0')
+        self.assertEqual(self.lookup([[other], [self.draft]]), self.draft)
+
+    def test_published_release_uses_same_shape(self):
+        published = dict(self.draft, draft=False, published_at='2026-10-29T00:00:00Z')
+        self.assertEqual(self.lookup([[published]]), published)
+
+    def test_missing_tag_requires_successful_complete_collection(self):
+        self.assertIsNone(self.lookup([[]]))
+        self.assertIsNone(self.lookup([[dict(self.draft, tag_name='z0.2.19-2')]]))
+
+    def test_duplicate_tag_across_pages_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'multiple releases'):
+            self.lookup([[self.draft], [dict(self.draft, id=2)]])
+
+    def test_access_network_and_server_errors_never_mean_absent(self):
+        for error in ['gh: Not Found (HTTP 404)', 'gh: Bad credentials (HTTP 401)',
+                      'gh: Forbidden (HTTP 403)', 'dial tcp: network unreachable', 'HTTP 503']:
+            response = subprocess.CompletedProcess([], 1, '', error)
+            with self.subTest(error=error), patch.object(release.subprocess, 'run', return_value=response):
+                with self.assertRaisesRegex(RuntimeError, 'cannot list releases'):
+                    release.release_info('example/sub2api', TAG)
+
+    def test_malformed_collection_rejected(self):
+        for data in [{}, [self.draft], [[None]], [[{}]]]:
+            with self.subTest(data=data), self.assertRaises(ValueError):
+                self.lookup(data)
+
+
 class PublishTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -99,12 +146,29 @@ class PublishTests(unittest.TestCase):
 
     def test_publish_new_draft_without_clobber(self):
         final = self.info(False, [{'name': name} for name in release.expected_archives(TAG) | {'checksums.txt'}])
-        with patch.object(release, 'release_info', side_effect=[None, self.info(), final]), patch.object(release, 'run', return_value=SHA) as run:
+        responses = [subprocess.CompletedProcess([], 0, json.dumps(pages), '')
+                     for pages in [[[]], [[self.info()]], [[final]]]]
+        # Exercise real release_info through create -> collection-visible draft ->
+        # uploaded assets -> published collection result, not a mocked lookup.
+        with patch.object(release.subprocess, 'run', side_effect=responses), patch.object(release, 'run', return_value=SHA) as run:
             release.publish(self.args)
         calls = [call.args for call in run.call_args_list]
         self.assertTrue(any(call[1:3] == ('release', 'create') and '--draft' in call for call in calls))
         self.assertTrue(any('--latest=false' in call and '--prerelease=false' in call for call in calls))
         self.assertFalse(any('--clobber' in call or 'delete' in call for call in calls))
+
+    def test_draft_visibility_failure_is_explicit_and_does_not_upload(self):
+        with patch.object(release, 'release_info', side_effect=[None, None]), patch.object(release, 'run', return_value=SHA) as run:
+            with self.assertRaisesRegex(RuntimeError, 'created draft is not visible'):
+                release.publish(self.args)
+        calls = [call.args for call in run.call_args_list]
+        self.assertEqual(sum(call[1:3] == ('release', 'create') for call in calls), 1)
+        self.assertFalse(any(call[1:3] in [('release', 'upload'), ('release', 'edit')] for call in calls))
+
+    def test_publish_verifies_final_visibility_without_none_crash(self):
+        with patch.object(release, 'release_info', side_effect=[self.info(), None]), patch.object(release, 'run', return_value=SHA):
+            with self.assertRaisesRegex(ValueError, 'publication verification failed'):
+                release.publish(self.args)
 
     def test_published_missing_asset_is_not_modified(self):
         with patch.object(release, 'release_info', return_value=self.info(False)), patch.object(release, 'run', return_value=SHA) as run:

@@ -47,17 +47,17 @@ func (r *opsRepository) BatchInsertTrafficEvents(ctx context.Context, inputs []*
 	for start := 0; start < len(args); start += opsTrafficInsertChunkSize {
 		end := min(start+opsTrafficInsertChunkSize, len(args))
 		var query strings.Builder
-		query.WriteString("INSERT INTO ops_traffic_events (event_id, request_id, group_id, account_id, platform, created_at, traffic) VALUES ")
+		_, _ = query.WriteString("INSERT INTO ops_traffic_events (event_id, request_id, group_id, account_id, platform, created_at, traffic) VALUES ")
 		values := make([]any, 0, (end-start)*7)
 		for i, row := range args[start:end] {
 			if i > 0 {
-				query.WriteByte(',')
+				_ = query.WriteByte(',')
 			}
 			p := i * 7
 			fmt.Fprintf(&query, "($%d,$%d,$%d,$%d,$%d,$%d,$%d::jsonb)", p+1, p+2, p+3, p+4, p+5, p+6, p+7)
 			values = append(values, row...)
 		}
-		query.WriteString(" ON CONFLICT (event_id) DO NOTHING")
+		_, _ = query.WriteString(" ON CONFLICT (event_id) DO NOTHING")
 		if _, err = tx.ExecContext(ctx, query.String(), values...); err != nil {
 			return err
 		}

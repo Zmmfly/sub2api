@@ -14,6 +14,7 @@
 package reqcompress
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"time"
@@ -101,7 +102,7 @@ func (r *Registry) syncObserved(accountID int64, enabled *bool, updatedAt time.T
 	case "enabled":
 		slog.Debug("reqcompress switch enabled", "account_id", accountID)
 	case "disabled":
-		r.deleteSharedAlgorithm(nil, accountID, AlgorithmNone)
+		r.deleteSharedAlgorithm(context.Background(), accountID, AlgorithmNone)
 		slog.Info("reqcompress switch disabled", "account_id", accountID)
 	}
 }

@@ -62,6 +62,7 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb)`, uuid.NewString(), "traffic-test", platf
 	require.Equal(t, &service.OpsTrafficDirection{
 		OriginalBytes: trafficInt64(1400), ActualBytes: trafficInt64(150),
 		OriginalSampleCount: 3, ActualSampleCount: 2,
+		CompressionPercent: float64TrafficPtr(62.5),
 	}, raw.Traffic.Upstream.Request)
 	require.Equal(t, &service.OpsTrafficDirection{
 		OriginalBytes: trafficInt64(0), ActualBytes: trafficInt64(725),
@@ -71,10 +72,14 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb)`, uuid.NewString(), "traffic-test", platf
 		OriginalBytes: trafficInt64(0), ActualBytes: trafficInt64(0),
 		OriginalSampleCount: 1, ActualSampleCount: 1,
 	}, raw.Traffic.Downstream.Request)
-	require.Equal(t, &service.OpsTrafficDirection{
-		OriginalBytes: trafficInt64(200), ActualBytes: trafficInt64(210),
-		OriginalSampleCount: 1, ActualSampleCount: 1,
-	}, raw.Traffic.Downstream.Response)
+	downstreamResponse := raw.Traffic.Downstream.Response
+	require.NotNil(t, downstreamResponse)
+	require.Equal(t, trafficInt64(200), downstreamResponse.OriginalBytes)
+	require.Equal(t, trafficInt64(210), downstreamResponse.ActualBytes)
+	require.EqualValues(t, 1, downstreamResponse.OriginalSampleCount)
+	require.EqualValues(t, 1, downstreamResponse.ActualSampleCount)
+	require.NotNil(t, downstreamResponse.CompressionPercent)
+	require.InDelta(t, -5, *downstreamResponse.CompressionPercent, 1e-9)
 
 	// Auto falls back when only traffic ledger data exists in missing buckets.
 	filter.QueryMode = service.OpsQueryModeAuto

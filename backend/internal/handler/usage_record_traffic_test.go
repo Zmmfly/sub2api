@@ -102,12 +102,12 @@ func TestUsageRecordTraffic_AfterCompressorClose(t *testing.T) {
 					case "gzip":
 						r, err := gzip.NewReader(reader)
 						require.NoError(t, err)
-						defer r.Close()
+						defer func() { require.NoError(t, r.Close()) }()
 						reader = r
 					case "deflate":
 						r, err := zlib.NewReader(reader)
 						require.NoError(t, err)
-						defer r.Close()
+						defer func() { require.NoError(t, r.Close()) }()
 						reader = r
 					case "br":
 						reader = brotli.NewReader(reader)

@@ -75,7 +75,9 @@ func encodeRequest(req *http.Request, algorithm Algorithm) (*http.Request, error
 	if err != nil {
 		return nil, err
 	}
-	defer body.Close()
+	// Closing the replay reader is best-effort; it must not change the
+	// compression result or the original request used for fallback.
+	defer func() { _ = body.Close() }()
 
 	original, err := io.ReadAll(io.LimitReader(body, MaxCompressibleBodyBytes+1))
 	if err != nil {

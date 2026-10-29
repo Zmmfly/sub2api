@@ -624,7 +624,7 @@ func TestResponseCompressSSEStreamFlushesPerChunk(t *testing.T) {
 				t.Helper()
 				for !strings.HasSuffix(plain.String(), suffix) {
 					part := readStreamBytesWithDeadline(t, label, plainReader, 5*time.Second)
-					plain.Write(part)
+					_, _ = plain.Write(part)
 				}
 			}
 			for i, chunk := range chunks {
@@ -644,7 +644,7 @@ func TestResponseCompressSSEStreamFlushesPerChunk(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read remaining decompressed stream: %v", err)
 			}
-			plain.Write(rest)
+			_, _ = plain.Write(rest)
 
 			if plain.String() != want {
 				t.Fatalf("decompressed stream mismatch: got %d bytes, want %d bytes", plain.Len(), len(want))

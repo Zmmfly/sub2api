@@ -21,7 +21,9 @@ func TestUsageTrafficEntMapping(t *testing.T) {
 		require.NoError(t, err)
 		payload, err := json.Marshal(value)
 		require.NoError(t, err)
-		*(values[0].(*[]byte)) = payload
+		trafficValue, ok := values[0].(*[]byte)
+		require.True(t, ok)
+		*trafficValue = payload
 		require.NoError(t, entity.assignValues(columns, values))
 		require.Equal(t, value, entity.Traffic)
 

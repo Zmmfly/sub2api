@@ -323,7 +323,7 @@ func (w *compressResponseWriter) prepareCommitHeaders() {
 		return
 	}
 	w.headersPrepared = true
-	header := w.ResponseWriter.Header()
+	header := w.Header()
 	appendVaryAcceptEncoding(header)
 	if w.encoding != "" {
 		weakenETagForVariant(header)
@@ -347,12 +347,12 @@ func (w *compressResponseWriter) initCompressor() {
 	if w.ResponseWriter.Written() {
 		return
 	}
-	switch w.ResponseWriter.Status() {
+	switch w.Status() {
 	case http.StatusNoContent, http.StatusNotModified, http.StatusPartialContent:
 		// 无 body 的状态码，以及 Range 部分内容（Content-Range 语义基于未压缩表示）不压缩
 		return
 	}
-	header := w.ResponseWriter.Header()
+	header := w.Header()
 	if strings.TrimSpace(traffic.ContentEncoding(header)) != "" {
 		// handler/上游已设置编码，不重复压缩
 		return

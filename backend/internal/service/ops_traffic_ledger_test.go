@@ -146,7 +146,7 @@ func TestOpsTrafficLedgerDimensionsBounded(t *testing.T) {
 func TestOpsTrafficLedgerRetentionUsesUUIDAndRawRetention(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	cutoff := time.Now().UTC()
 	mock.ExpectExec(`(?s)SELECT event_id FROM ops_traffic_events.*WHERE created_at < \$1.*DELETE FROM ops_traffic_events.*WHERE event_id IN`).WithArgs(cutoff, 10).WillReturnResult(sqlmock.NewResult(0, 2))
 	mock.ExpectExec(`(?s)SELECT event_id FROM ops_traffic_events`).WithArgs(cutoff, 10).WillReturnResult(sqlmock.NewResult(0, 0))
@@ -164,7 +164,7 @@ func TestOpsTrafficLedgerRetentionUsesUUIDAndRawRetention(t *testing.T) {
 func TestOpsTrafficLedgerCleanupWiringUsesErrorLogRetention(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	svc := &OpsCleanupService{db: db, cfg: &config.Config{}, effective: opsCleanupEffectiveConfig{
 		OpsCleanupConfig:       config.OpsCleanupConfig{ErrorLogRetentionDays: 7, MinuteMetricsRetentionDays: -1, HourlyMetricsRetentionDays: -1},
 		SystemLogRetentionDays: -1,

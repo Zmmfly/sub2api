@@ -62,7 +62,7 @@ func decodeRequest(t *testing.T, req *http.Request) []byte {
 	case AlgorithmDeflate:
 		deflate, err := zlib.NewReader(bytes.NewReader(raw))
 		require.NoError(t, err)
-		defer deflate.Close()
+		defer func() { require.NoError(t, deflate.Close()) }()
 		reader = deflate
 	default:
 		t.Fatalf("unexpected Content-Encoding %q", req.Header.Get("Content-Encoding"))

@@ -23,7 +23,7 @@ func TestTrafficHijackImmediatelyDrainsCallbacks(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
 		_ = rw.Flush()
 		// Usage emitted by a WS turn must not wait for session shutdown.
@@ -40,7 +40,7 @@ func TestTrafficHijackImmediatelyDrainsCallbacks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatal(resp.StatusCode)
 	}

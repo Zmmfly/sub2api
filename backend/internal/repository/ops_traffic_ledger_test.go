@@ -30,7 +30,7 @@ func (trafficJSONArg) Match(value driver.Value) bool {
 func TestOpsTrafficLedgerSQLArgsAndDuplicateID(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	repo := &opsRepository{db: db}
 	zero, group, account := int64(0), int64(7), int64(8)
 	event := &service.OpsTrafficEvent{EventID: uuid.NewString(), RequestID: "client-id", GroupID: &group, AccountID: &account, Platform: " OpenAI ", CreatedAt: time.Now().UTC(), Traffic: &traffic.Usage{Downstream: &traffic.Link{Response: &traffic.Measurement{ActualBytes: &zero}}}}
@@ -46,7 +46,7 @@ func TestOpsTrafficLedgerSQLArgsAndDuplicateID(t *testing.T) {
 func TestOpsTrafficLedgerSQLChunksAtomicAndUnknown(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	repo := &opsRepository{db: db}
 	events := make([]*service.OpsTrafficEvent, opsTrafficInsertChunkSize+1)
 	for i := range events {
@@ -63,7 +63,7 @@ func TestOpsTrafficLedgerSQLChunksAtomicAndUnknown(t *testing.T) {
 func TestOpsTrafficLedgerRejectsInvalidBeforeTransaction(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	repo := &opsRepository{db: db}
 	for _, event := range []*service.OpsTrafficEvent{nil, {}, {EventID: strings.Repeat("x", 36), CreatedAt: time.Now(), Traffic: &traffic.Usage{}}} {
 		require.Error(t, repo.BatchInsertTrafficEvents(context.Background(), []*service.OpsTrafficEvent{event}))

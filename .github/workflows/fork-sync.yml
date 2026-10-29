@@ -1,0 +1,36 @@
+name: Sync upstream and build traffic-stat
+on:
+  schedule:
+    - cron: '17 */12 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: fork-sync-upstream
+  cancel-in-progress: false
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.sync.outputs.sha }}
+      changed: ${{ steps.sync.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Merge upstream into main and main into traffic-stat
+        id: sync
+        shell: bash
+        run: bash .github/scripts/fork-sync.sh
+  build:
+    needs: sync
+    if: ${{ needs.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch' }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/fork-build.yml
+    with:
+      source_sha: ${{ needs.sync.outputs.sha }}

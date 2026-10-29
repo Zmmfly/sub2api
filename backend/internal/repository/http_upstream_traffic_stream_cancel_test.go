@@ -49,7 +49,7 @@ func TestUpstreamTrafficCloseCancelsReadWithoutDiscardingPrefix(t *testing.T) {
 	require.NoError(t, err)
 	resp, err := doUpstreamRequest(client, req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, err = io.ReadFull(resp.Body, make([]byte, len(prefix)))
 	require.NoError(t, err)
 	readResult := make(chan error, 1)

@@ -44,7 +44,8 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb)`, uuid.NewString(), "traffic-test", platf
 	insert(start.Add(-time.Second), "openai", groupID, `{"upstream":{"request":{"original_bytes":9999,"actual_bytes":9999}}}`)
 	insert(end, "openai", groupID, `{"upstream":{"request":{"original_bytes":9999,"actual_bytes":9999}}}`)
 
-	repo := NewOpsRepository(integrationDB).(*opsRepository)
+	repo, ok := NewOpsRepository(integrationDB).(*opsRepository)
+	require.True(t, ok)
 	filter := &service.OpsDashboardFilter{StartTime: start, EndTime: end, Platform: " OpenAI ", GroupID: &groupID, QueryMode: service.OpsQueryModeRaw}
 	raw, err := repo.GetDashboardOverview(ctx, filter)
 	require.NoError(t, err)

@@ -82,13 +82,15 @@ func TestUsageTrafficPrepareAndSQLScanRoundTrip(t *testing.T) {
 				require.Nil(t, prepared.args[trafficIndex], "historical traffic must be SQL NULL")
 			} else {
 				var decoded traffic.Usage
-				require.NoError(t, json.Unmarshal([]byte(prepared.args[trafficIndex].(string)), &decoded))
+				payload, ok := prepared.args[trafficIndex].(string)
+				require.True(t, ok)
+				require.NoError(t, json.Unmarshal([]byte(payload), &decoded))
 				require.Equal(t, tc.value, &decoded)
 			}
 
 			db, mock, err := sqlmock.New()
 			require.NoError(t, err)
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			values := append([]driver.Value{int64(71)}, anySliceToDriverValues(prepared.args)...)
 			query := "SELECT " + usageLogSelectColumns + " FROM usage_logs WHERE id = $1"
 			mock.ExpectQuery(regexp.QuoteMeta(query)).WithArgs(int64(71)).
@@ -106,7 +108,8 @@ func TestUsageTrafficPrepareAndSQLScanRoundTrip(t *testing.T) {
 func TestUsageTrafficPrepareFreezesBatchSnapshot(t *testing.T) {
 	value := trafficTestUsage()
 	prepared := prepareUsageLogInsert(trafficTestLog(value))
-	payload := prepared.args[len(prepared.args)-2].(string)
+	payload, ok := prepared.args[len(prepared.args)-2].(string)
+	require.True(t, ok)
 	*value.Downstream.Request.ActualBytes = 999
 	value.Upstream = nil
 	var got traffic.Usage
@@ -131,7 +134,7 @@ func TestUsageTrafficSQLScanMissingAndInvalidJSON(t *testing.T) {
 			prepared.args[len(prepared.args)-2] = tc.payload
 			db, mock, err := sqlmock.New()
 			require.NoError(t, err)
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			values := append([]driver.Value{int64(1)}, anySliceToDriverValues(prepared.args)...)
 			mock.ExpectQuery("SELECT").WillReturnRows(sqlmock.NewRows(strings.Split(usageLogSelectColumns, ", ")).AddRow(values...))
 			got, err := scanUsageLog(db.QueryRow("SELECT"))
@@ -201,7 +204,7 @@ func TestUsageTrafficAllInsertColumnContracts(t *testing.T) {
 			var actual string
 			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherFunc(func(_, query string) error { actual = query; return nil })))
 			require.NoError(t, err)
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 			if kind == "no-result" {
 				mock.ExpectExec("").WithArgs(anySliceToDriverValues(prepared.args)...).WillReturnResult(sqlmock.NewResult(0, 1))
 				require.NoError(t, execUsageLogInsertNoResult(context.Background(), db, prepared))

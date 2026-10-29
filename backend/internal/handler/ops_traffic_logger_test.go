@@ -84,7 +84,7 @@ func TestOpsTrafficLedgerSaturationDoesNotDelaySmallHTTPResponse(t *testing.T) {
 	started := time.Now()
 	response, err := client.Get(server.URL + "/v1/messages")
 	require.NoError(t, err, "HTTP completion must not wait for telemetry queue capacity")
-	defer response.Body.Close()
+	defer func() { require.NoError(t, response.Body.Close()) }()
 	body, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
 	require.Less(t, time.Since(started), 200*time.Millisecond)

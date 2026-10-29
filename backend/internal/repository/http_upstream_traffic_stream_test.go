@@ -42,7 +42,12 @@ func TestUpstreamTrafficSSETerminalBeforeEOF(t *testing.T) {
 						w.Header().Set("Content-Encoding", "gzip")
 					}
 					_, _ = w.Write(encoded)
-					w.(http.Flusher).Flush()
+					flusher, ok := w.(http.Flusher)
+					if !ok {
+						t.Error("response writer does not support flushing")
+						return
+					}
+					flusher.Flush()
 					// Do not send EOF; only client cancellation ends this request.
 					<-r.Context().Done()
 				}))
@@ -60,7 +65,7 @@ func TestUpstreamTrafficSSETerminalBeforeEOF(t *testing.T) {
 				require.NoError(t, err)
 				resp, err := doUpstreamRequest(server.Client(), req)
 				require.NoError(t, err)
-				defer resp.Body.Close()
+				defer func() { _ = resp.Body.Close() }()
 				require.Equal(t, map[bool]int{false: 1, true: 2}[h2], resp.ProtoMajor)
 				scanner := bufio.NewScanner(resp.Body)
 				terminal := false

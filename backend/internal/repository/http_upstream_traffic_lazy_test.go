@@ -33,7 +33,12 @@ func TestUpstreamTrafficLazyHeadersOnlyClose(t *testing.T) {
 							w.Header().Set("Location", "/redirect")
 						}
 						w.WriteHeader(status)
-						w.(http.Flusher).Flush()
+						flusher, ok := w.(http.Flusher)
+						if !ok {
+							t.Error("response writer does not support flushing")
+							return
+						}
+						flusher.Flush()
 						close(headersSent)
 						select {
 						case <-releaseBody:
@@ -110,7 +115,12 @@ func TestUpstreamTrafficLazyReadCancellation(t *testing.T) {
 					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						w.Header().Set("Content-Encoding", encoding)
 						w.WriteHeader(http.StatusOK)
-						w.(http.Flusher).Flush()
+						flusher, ok := w.(http.Flusher)
+						if !ok {
+							t.Error("response writer does not support flushing")
+							return
+						}
+						flusher.Flush()
 						<-r.Context().Done()
 					}))
 					defer server.Close()

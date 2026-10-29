@@ -1,24 +1,25 @@
-name: Traffic-stat push and manual build
+name: Fork main push and manual release
 on:
   push:
-    branches: [dev/traffic-stat]
+    branches: [main]
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
   packages: write
 jobs:
   resolve:
+    if: github.repository == 'Zmmfly/sub2api'
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'push' && github.sha || 'dev/traffic-stat' }}
+          ref: ${{ github.event_name == 'push' && github.sha || 'main' }}
           persist-credentials: false
       - id: source
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-  build:
+  release:
     needs: resolve
     uses: ./.github/workflows/fork-build.yml
     with:

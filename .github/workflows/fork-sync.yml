@@ -1,4 +1,4 @@
-name: Sync upstream and build traffic-stat
+name: Sync upstream into fork main
 on:
   schedule:
     - cron: '17 */12 * * *'
@@ -10,6 +10,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   sync:
+    if: github.repository == 'Zmmfly/sub2api'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -21,7 +22,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-      - name: Merge upstream into main and main into traffic-stat
+      - name: Merge upstream into fork main
         id: sync
         shell: bash
         run: bash .github/scripts/fork-sync.sh
@@ -29,7 +30,7 @@ jobs:
     needs: sync
     if: ${{ needs.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch' }}
     permissions:
-      contents: read
+      contents: write
       packages: write
     uses: ./.github/workflows/fork-build.yml
     with:

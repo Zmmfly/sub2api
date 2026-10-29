@@ -1,6 +1,8 @@
 .PHONY: build build-backend build-frontend test test-backend test-frontend test-frontend-critical
 
 FRONTEND_CRITICAL_VITEST := \
+	src/utils/__tests__/version.spec.ts \
+	src/components/common/__tests__/VersionBadge.spec.ts \
 	src/i18n/__tests__/localeKeyCompleteness.spec.ts \
 	src/i18n/__tests__/runtimeCompatibility.spec.ts \
 	src/api/__tests__/client.spec.ts \

@@ -17,7 +17,7 @@ import yaml
 FULL_CONFIG = Path('.goreleaser.yaml')
 SIMPLE_CONFIG = Path('.goreleaser.simple.yaml')
 VERSION_FILE = Path('backend/cmd/server/VERSION')
-VERSION_RE = re.compile(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?')
+VERSION_RE = re.compile(r'(?:z\d+\.\d+\.\d+-[1-9]\d*|\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)')
 
 
 def config(simple=False):
@@ -81,7 +81,20 @@ def generate_config(args):
     data['snapshot'] = {'version_template': '{{ .Env.RELEASE_VERSION }}'}
     data['dockers'] = []
     data['docker_manifests'] = []
-    if args.mode == 'build':
+    if args.mode == 'fork-build':
+        data['before'] = {'hooks': []}
+        for build in data['builds']:
+            build['flags'] = list(build.get('flags', [])) + ['-trimpath']
+            build['ldflags'] = ['-s -w', '-X main.Version={{ .Env.RELEASE_VERSION }}',
+                                '-X main.Commit={{ .Commit }}',
+                                '-X main.Date={{ .Env.RELEASE_DATE }}', '-X main.BuildType=release']
+            build['mod_timestamp'] = '{{ .CommitTimestamp }}'
+        for archive in data['archives']:
+            archive['builds_info'] = {'mtime': '{{ .CommitDate }}', 'owner': 'root', 'group': 'root'}
+            archive['files'] = [{'src': item, 'info': {'mtime': '{{ .CommitDate }}', 'owner': 'root', 'group': 'root'}}
+                                if isinstance(item, str) else item for item in archive.get('files', [])]
+        data['release'] = {'disable': True}
+    elif args.mode == 'build':
         target = {'goos': args.goos, 'goarch': args.goarch}
         if target not in targets():
             raise ValueError('unsupported build target')
@@ -117,6 +130,12 @@ def collect(args):
     shutil.copy2(source, output / name)
     manifest = {'sha': args.sha, 'version': args.version, 'target': target, 'archive': name, 'sha256': digest}
     (output / f"manifest-{args.goos}-{args.goarch}.json").write_text(json.dumps(manifest) + '\n')
+
+
+def collect_all(args):
+    for target in targets():
+        args.goos, args.goarch = target['goos'], target['goarch']
+        collect(args)
 
 
 def verify(args):
@@ -163,7 +182,7 @@ def main():
     p.add_argument('--dry-run', action='store_true')
     p.set_defaults(run=plan)
     p = commands.add_parser('config')
-    p.add_argument('mode', choices=['build', 'publish'])
+    p.add_argument('mode', choices=['build', 'publish', 'fork-build'])
     p.add_argument('--goos')
     p.add_argument('--goarch')
     p.add_argument('--simple', action='store_true')
@@ -173,6 +192,10 @@ def main():
     for arg in ('version', 'sha', 'goos', 'goarch', 'output'):
         p.add_argument('--' + arg, required=True)
     p.set_defaults(run=collect)
+    p = commands.add_parser('collect-all')
+    for arg in ('version', 'sha', 'output'):
+        p.add_argument('--' + arg, required=True)
+    p.set_defaults(run=collect_all)
     for command, handler in [('verify', verify), ('contexts', contexts)]:
         p = commands.add_parser(command)
         for arg in ('version', 'sha', 'input'):

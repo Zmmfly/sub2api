@@ -4,7 +4,12 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -28,16 +33,21 @@ func (s *updateServiceCacheStub) SetUpdateInfo(_ context.Context, data string, _
 }
 
 type updateServiceGitHubClientStub struct {
+	checksumData   []byte
+	checksumURL    string
+	requestedRepo  string
 	release        *GitHubRelease
 	recentReleases []*GitHubRelease
 	recentErr      error
 }
 
-func (s *updateServiceGitHubClientStub) FetchLatestRelease(context.Context, string) (*GitHubRelease, error) {
+func (s *updateServiceGitHubClientStub) FetchLatestRelease(_ context.Context, repo string) (*GitHubRelease, error) {
+	s.requestedRepo = repo
 	return s.release, nil
 }
 
-func (s *updateServiceGitHubClientStub) FetchRecentReleases(context.Context, string, int) ([]*GitHubRelease, error) {
+func (s *updateServiceGitHubClientStub) FetchRecentReleases(_ context.Context, repo string, _ int) ([]*GitHubRelease, error) {
+	s.requestedRepo = repo
 	return s.recentReleases, s.recentErr
 }
 
@@ -45,8 +55,9 @@ func (s *updateServiceGitHubClientStub) DownloadFile(context.Context, string, st
 	panic("DownloadFile should not be called when no update is available")
 }
 
-func (s *updateServiceGitHubClientStub) FetchChecksumFile(context.Context, string) ([]byte, error) {
-	panic("FetchChecksumFile should not be called when no update is available")
+func (s *updateServiceGitHubClientStub) FetchChecksumFile(_ context.Context, url string) ([]byte, error) {
+	s.checksumURL = url
+	return s.checksumData, nil
 }
 
 func TestUpdateServicePerformUpdateNoUpdateReturnsSentinel(t *testing.T) {
@@ -184,4 +195,108 @@ func TestUpdateServiceRollbackToVersionAcceptsVPrefix(t *testing.T) {
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrRollbackVersionNotAllowed)
 	require.Contains(t, err.Error(), "no compatible release found")
+}
+
+func TestCompareVersionsForkRevision(t *testing.T) {
+	for _, tc := range []struct {
+		current, latest string
+		want            int
+	}{
+		{"z0.2.18-9", "z0.2.18-10", -1},
+		{"z0.2.18-10", "z0.2.18-9", 1},
+		{"z0.2.18-10", "z0.2.18-10", 0},
+		{"z0.2.18-100", "z0.2.19-1", -1},
+		{"v0.2.18", "z0.2.18-1", -1},
+		{"0.2.19", "z0.2.18-1", 1},
+		{"traffic-stat-578c32412b22", "z0.2.18-1", -1},
+		{"vtraffic-stat-578c32412b22", "z0.2.18-1", -1},
+		{"dev", "z0.2.18-1", 0},
+		{"z0.2.18-1", "garbage", 0},
+	} {
+		require.Equal(t, tc.want, compareVersions(tc.current, tc.latest), "%s vs %s", tc.current, tc.latest)
+	}
+}
+
+func TestParseReleaseVersionRejectsMalformedVersions(t *testing.T) {
+	for _, version := range []string{"", "z0.2.18", "z0.2.18-0", "z0.2.18-01", "z0.2.18-rc1", "z0.2.18-1-extra", "0.2", "z0.2.18-18446744073709551616"} {
+		_, valid := parseVersion(version)
+		require.False(t, valid, version)
+	}
+}
+
+func TestUpdateServiceForkLatestAndCacheMigration(t *testing.T) {
+	cache := &updateServiceCacheStub{data: `{"latest":"99.0.0","release_info":{},"timestamp":` + strconv.FormatInt(time.Now().Unix(), 10) + `}`}
+	client := &updateServiceGitHubClientStub{release: &GitHubRelease{TagName: "z0.2.18-10"}}
+	svc := NewUpdateService(cache, client, "z0.2.18-9", "release")
+	info, err := svc.CheckUpdate(context.Background(), false)
+	require.NoError(t, err)
+	require.Equal(t, "Zmmfly/sub2api", client.requestedRepo)
+	require.Equal(t, "z0.2.18-10", info.LatestVersion)
+	require.True(t, info.HasUpdate)
+	require.False(t, info.Cached)
+	info, err = svc.CheckUpdate(context.Background(), false)
+	require.NoError(t, err)
+	require.True(t, info.Cached)
+	require.True(t, info.HasUpdate)
+}
+
+func TestUpdateServiceForkRollbackOrder(t *testing.T) {
+	svc := newRollbackTestService("z0.2.18-11", []*GitHubRelease{
+		{TagName: "z0.2.18-9"}, {TagName: "z0.2.18-10"}, {TagName: "z0.2.18-8"},
+		{TagName: "vtraffic-stat-578c32412b22"}, {TagName: "z0.2.18-12"}, {TagName: "invalid"},
+	})
+	versions, err := svc.ListRollbackVersions(context.Background())
+	require.NoError(t, err)
+	require.Len(t, versions, 3)
+	require.Equal(t, "z0.2.18-10", versions[0].Version)
+	require.Equal(t, "z0.2.18-9", versions[1].Version)
+	require.Equal(t, "z0.2.18-8", versions[2].Version)
+	err = svc.RollbackToVersion(context.Background(), "z0.2.18-10")
+	require.ErrorContains(t, err, "no compatible release found")
+}
+
+func TestUpdateServiceForkAssetValidation(t *testing.T) {
+	base := "https://github.com/Zmmfly/sub2api/releases/download/z0.2.18-1/"
+	require.NoError(t, validateDownloadURL(base + "checksums.txt"))
+	for _, raw := range []string{
+		"https://github.com/Wei-Shaw/sub2api/releases/download/v0.2.18/checksums.txt",
+		"https://github.com/Zmmfly/sub2api-other/releases/download/z0.2.18-1/checksums.txt",
+		"https://evil.github.com/Zmmfly/sub2api/releases/download/z0.2.18-1/checksums.txt",
+		"http://github.com/Zmmfly/sub2api/releases/download/z0.2.18-1/checksums.txt",
+	} {
+		require.Error(t, validateDownloadURL(raw), raw)
+	}
+	svc := NewUpdateService(nil, nil, "z0.2.18-1", "release")
+	assets := []Asset{{Name: "sub2api_z0.2.18-2_" + svc.getArchiveName() + ".tar.gz", DownloadURL: base + "archive.tar.gz"}}
+	require.ErrorContains(t, svc.applyReleaseAssets(context.Background(), assets), "missing checksums.txt")
+	assets = append(assets, Asset{Name: "checksums.txt", DownloadURL: "https://github.com/Wei-Shaw/sub2api/releases/download/v0.2.18/checksums.txt"})
+	require.ErrorContains(t, svc.applyReleaseAssets(context.Background(), assets), "invalid checksum URL")
+}
+
+func TestUpdateServiceVerifiesForkArchiveChecksum(t *testing.T) {
+	archiveName := "sub2api_z0.2.18-10_linux_amd64.tar.gz"
+	archivePath := filepath.Join(t.TempDir(), archiveName)
+	content := []byte("archive fixture")
+	require.NoError(t, os.WriteFile(archivePath, content, 0600))
+	client := &updateServiceGitHubClientStub{
+		checksumData: []byte(fmt.Sprintf("%x  %s\n", sha256.Sum256(content), archiveName)),
+	}
+	svc := NewUpdateService(nil, client, "z0.2.18-9", "release")
+	checksumURL := "https://github.com/Zmmfly/sub2api/releases/download/z0.2.18-10/checksums.txt"
+	require.NoError(t, svc.verifyChecksum(context.Background(), archivePath, checksumURL))
+	require.Equal(t, checksumURL, client.checksumURL)
+	require.NoError(t, os.WriteFile(archivePath, []byte("tampered"), 0600))
+	require.ErrorContains(t, svc.verifyChecksum(context.Background(), archivePath, checksumURL), "checksum mismatch")
+}
+
+func TestUpdateServiceRejectsNonCanonicalLatest(t *testing.T) {
+	for _, tag := range []string{"v0.2.19", "traffic-stat-578c32412b22", "z0.2.18-0", "z0.2.18-1-rc1"} {
+		svc := NewUpdateService(&updateServiceCacheStub{}, &updateServiceGitHubClientStub{
+			release: &GitHubRelease{TagName: tag},
+		}, "z0.2.18-1", "release")
+		info, err := svc.CheckUpdate(context.Background(), true)
+		require.NoError(t, err)
+		require.False(t, info.HasUpdate, tag)
+		require.Contains(t, info.Warning, "unsupported release version")
+	}
 }

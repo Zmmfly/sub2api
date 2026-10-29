@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -30,11 +31,10 @@ var (
 const (
 	updateCacheKey = "update_check_cache"
 	updateCacheTTL = 1200 // 20 minutes
-	githubRepo     = "Wei-Shaw/sub2api"
+	githubRepo     = "Zmmfly/sub2api"
 
 	// Security: allowed download domains for updates
 	allowedDownloadHost = "github.com"
-	allowedAssetHost    = "objects.githubusercontent.com"
 
 	// Security: max download size (500MB)
 	maxDownloadSize = 500 * 1024 * 1024
@@ -118,7 +118,7 @@ type GitHubRelease struct {
 
 // RollbackVersion describes a release version the system can roll back to
 type RollbackVersion struct {
-	Version     string `json:"version"` // without "v" prefix, e.g. "0.1.146"
+	Version     string `json:"version"` // fork tag (z0.2.18-1), or legacy version without v
 	PublishedAt string `json:"published_at"`
 	HTMLURL     string `json:"html_url"`
 }
@@ -168,7 +168,7 @@ func (s *UpdateService) PerformUpdate(ctx context.Context) error {
 		return err
 	}
 
-	if !info.HasUpdate {
+	if !info.HasUpdate || info.ReleaseInfo == nil {
 		return ErrNoUpdateAvailable
 	}
 
@@ -185,7 +185,7 @@ func (s *UpdateService) applyReleaseAssets(ctx context.Context, releaseAssets []
 	var checksumURL string
 
 	for _, asset := range releaseAssets {
-		if strings.Contains(asset.Name, archiveName) && !strings.HasSuffix(asset.Name, ".txt") {
+		if strings.HasPrefix(asset.Name, "sub2api_") && strings.HasSuffix(asset.Name, "_"+archiveName+".tar.gz") {
 			downloadURL = asset.DownloadURL
 		}
 		if asset.Name == "checksums.txt" {
@@ -195,6 +195,10 @@ func (s *UpdateService) applyReleaseAssets(ctx context.Context, releaseAssets []
 
 	if downloadURL == "" {
 		return fmt.Errorf("no compatible release found for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+
+	if checksumURL == "" {
+		return fmt.Errorf("release is missing checksums.txt")
 	}
 
 	// SECURITY: Validate download URL is from trusted domain
@@ -375,7 +379,7 @@ func (s *UpdateService) fetchRollbackCandidates(ctx context.Context) ([]*GitHubR
 			continue
 		}
 		v := strings.TrimPrefix(r.TagName, "v")
-		if v == "" || seen[v] {
+		if _, valid := parseVersion(v); !valid || seen[v] {
 			continue
 		}
 		// Only versions strictly older than current (also excludes current itself)
@@ -405,7 +409,13 @@ func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, er
 		return nil, err
 	}
 
+	if release == nil || release.Draft || release.Prerelease {
+		return nil, fmt.Errorf("no stable release available")
+	}
 	latestVersion := strings.TrimPrefix(release.TagName, "v")
+	if _, valid := parseVersion(latestVersion); !valid || !strings.HasPrefix(latestVersion, "z") {
+		return nil, fmt.Errorf("unsupported release version: %s", release.TagName)
+	}
 
 	assets := make([]Asset, len(release.Assets))
 	for i, a := range release.Assets {
@@ -455,14 +465,11 @@ func validateDownloadURL(rawURL string) error {
 		return fmt.Errorf("only HTTPS URLs are allowed")
 	}
 
-	// Check against allowed hosts
-	host := parsedURL.Host
-	// GitHub release URLs can be from github.com or objects.githubusercontent.com
-	if host != allowedDownloadHost &&
-		!strings.HasSuffix(host, "."+allowedDownloadHost) &&
-		host != allowedAssetHost &&
-		!strings.HasSuffix(host, "."+allowedAssetHost) {
-		return fmt.Errorf("download from untrusted host: %s", host)
+	// API asset URLs must belong to this fork, not merely any GitHub repository.
+	// The HTTP client follows GitHub's signed asset redirects after this check.
+	if parsedURL.Host != allowedDownloadHost || parsedURL.User != nil ||
+		!strings.HasPrefix(parsedURL.Path, "/"+githubRepo+"/releases/download/") {
+		return fmt.Errorf("download must be a release asset from %s", githubRepo)
 	}
 
 	return nil
@@ -600,12 +607,20 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 	}
 
 	var cached struct {
+		Repository  string       `json:"repository"`
 		Latest      string       `json:"latest"`
 		ReleaseInfo *ReleaseInfo `json:"release_info"`
 		Timestamp   int64        `json:"timestamp"`
 	}
 	if err := json.Unmarshal([]byte(data), &cached); err != nil {
 		return nil, err
+	}
+
+	if cached.Repository != githubRepo {
+		return nil, fmt.Errorf("update cache belongs to another repository")
+	}
+	if _, valid := parseVersion(cached.Latest); !valid || !strings.HasPrefix(cached.Latest, "z") || cached.ReleaseInfo == nil {
+		return nil, fmt.Errorf("invalid cached release")
 	}
 
 	if time.Now().Unix()-cached.Timestamp > updateCacheTTL {
@@ -624,10 +639,12 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 
 func (s *UpdateService) saveToCache(ctx context.Context, info *UpdateInfo) {
 	cacheData := struct {
+		Repository  string       `json:"repository"`
 		Latest      string       `json:"latest"`
 		ReleaseInfo *ReleaseInfo `json:"release_info"`
 		Timestamp   int64        `json:"timestamp"`
 	}{
+		Repository:  githubRepo,
 		Latest:      info.LatestVersion,
 		ReleaseInfo: info.ReleaseInfo,
 		Timestamp:   time.Now().Unix(),
@@ -637,12 +654,22 @@ func (s *UpdateService) saveToCache(ctx context.Context, info *UpdateInfo) {
 	_ = s.cache.SetUpdateInfo(ctx, string(data), time.Duration(updateCacheTTL)*time.Second)
 }
 
-// compareVersions compares two semantic versions
-func compareVersions(current, latest string) int {
-	currentParts := parseVersion(current)
-	latestParts := parseVersion(latest)
+// Fork revisions are release counters, NOT semver prereleases: z0.2.18-10 > z0.2.18-9.
+// Legacy v/bare releases have revision zero. Unrecognized builds are not ordered;
+// only the known traffic-stat image format may migrate to a canonical fork release.
+var releaseVersionPattern = regexp.MustCompile(`^(?:z(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-([1-9][0-9]*)|v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$`)
+var legacyTrafficVersionPattern = regexp.MustCompile(`^v?traffic-stat-[0-9a-f]{7,40}$`)
 
-	for i := 0; i < 3; i++ {
+func compareVersions(current, latest string) int {
+	currentParts, currentValid := parseVersion(current)
+	latestParts, latestValid := parseVersion(latest)
+	if !currentValid || !latestValid {
+		if legacyTrafficVersionPattern.MatchString(current) && latestValid && strings.HasPrefix(latest, "z") {
+			return -1
+		}
+		return 0
+	}
+	for i := range currentParts {
 		if currentParts[i] < latestParts[i] {
 			return -1
 		}
@@ -653,17 +680,22 @@ func compareVersions(current, latest string) int {
 	return 0
 }
 
-func parseVersion(v string) [3]int {
-	v = strings.TrimPrefix(v, "v")
-	if idx := strings.IndexByte(v, '-'); idx != -1 {
-		v = v[:idx]
+func parseVersion(v string) ([4]uint64, bool) {
+	var result [4]uint64
+	parts := releaseVersionPattern.FindStringSubmatch(v)
+	if parts == nil {
+		return result, false
 	}
-	parts := strings.Split(v, ".")
-	result := [3]int{0, 0, 0}
-	for i := 0; i < len(parts) && i < 3; i++ {
-		if parsed, err := strconv.Atoi(parts[i]); err == nil {
-			result[i] = parsed
+	components := parts[1:5]
+	if parts[1] == "" {
+		components = parts[5:8]
+	}
+	for i, component := range components {
+		parsed, err := strconv.ParseUint(component, 10, 64)
+		if err != nil {
+			return result, false
 		}
+		result[i] = parsed
 	}
-	return result
+	return result, true
 }

@@ -28,3 +28,47 @@ python -m pip install -r .github/release-tools/requirements-release.txt
 python -m unittest discover -s .github/release-tools -p 'test_release_matrix.py'
 bash -n .github/release-tools/release-images.sh
 ```
+
+## Zmmfly fork main releases
+
+`fork-latest.yml` (main pushes/manual runs) and `fork-sync.yml` (upstream main
+merge every 12 hours/manual runs) call the same serialized `fork-build.yml`.
+GITHUB_TOKEN pushes do not recursively start workflows: sync explicitly calls
+publication with the merge SHA. The former development branch is no longer a
+sync or publication target. Merge conflicts stop before pushing; preserve fork
+traffic statistics and compression when repairing them.
+
+`backend/cmd/server/VERSION` remains upstream-owned numeric metadata. Allocation
+reads it **at the selected commit**, then reserves `z<base>-N` as an annotated tag,
+starting at 1 per base and incrementing the highest existing N. Tags are never
+moved. Retrying the same commit reuses its reserved version, even after a failed
+build; gaps are possible after abandoned reservations. A superseded queued run
+is skipped before allocation. One repository-wide workflow concurrency lock
+covers allocation, builds and publication. GitHub may replace older pending
+runs with newer pending runs; it never cancels the active publisher here.
+
+The exact z version is injected into the embedded VERSION and Go linker flags,
+archives and OCI labels. The full configured binary matrix, frontend and both
+Linux runtime images are built (no simple/image-only mode). The numeric suffix
+is a **stable fork revision**, not a semantic-version prerelease. The helper
+publishes a draft only after all archives/checksums and images exist, explicitly
+sets prerelease=false, and promotes GitHub/GHCR latest only for the current main
+SHA. Normal upstream v-tag publishing remains available outside this fork;
+Zmmfly permits that workflow only as a nonpublishing dry run.
+
+Publication never deletes or overwrites release assets. Draft retries verify
+existing bytes and upload missing assets. A completed release is hash-verified and reused without recompiling; verified
+archives can recover missing images. Incomplete published releases fail closed
+for manual investigation.
+Versioned images are reused after label/platform verification on retries, while
+registry/authentication failures
+fail closed rather than treating a tag as absent. Immutable history is retained.
+A run interrupted between release publication and latest promotion can be rerun.
+No personal access token, DockerHub or notification secret is required.
+
+Additional checks:
+
+```bash
+python -m unittest discover -s .github/scripts -p 'test_fork*.py'
+bash -n .github/scripts/fork-*.sh
+```

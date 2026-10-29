@@ -34,6 +34,9 @@ env:
 
 jobs:
   prepare:
+    # This fork publishes stable z tags through fork-build.yml only. Keep the
+    # upstream v-tag pipeline available outside this fork and for dry runs.
+    if: github.repository != 'Zmmfly/sub2api' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == true)
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.plan.outputs.sha }}

@@ -51,6 +51,18 @@ class ReleaseMatrixTest(unittest.TestCase):
             (directory / f"manifest-{target['goos']}-{target['goarch']}.json").write_text(json.dumps(metadata))
         return argparse.Namespace(input='release-input', version='9.8.7', sha='a' * 40, simple=simple, output='contexts')
 
+    def test_fork_build_keeps_full_matrix_and_exact_version(self):
+        release.generate_config(argparse.Namespace(mode='fork-build', simple=False, output='fork.yaml'))
+        data = yaml.safe_load(Path('fork.yaml').read_text())
+        self.assertEqual(data['builds'][0]['goos'], release.config()['builds'][0]['goos'])
+        self.assertIn('-X main.Version={{ .Env.RELEASE_VERSION }}', data['builds'][0]['ldflags'])
+        self.assertEqual(data['snapshot']['version_template'], '{{ .Env.RELEASE_VERSION }}')
+        self.assertTrue(data['release']['disable'])
+        self.assertEqual(data['before']['hooks'], [])
+        self.assertEqual(data['archives'][0]['builds_info']['mtime'], '{{ .CommitDate }}')
+        self.assertEqual(release.archive_name('z0.2.19-10', {'goos': 'linux', 'goarch': 'amd64'}),
+                         'sub2api_z0.2.19-10_linux_amd64.tar.gz')
+
     def test_full_and_simple_matrix_match_existing_targets(self):
         full = release.targets()
         self.assertEqual(len(full), 5)

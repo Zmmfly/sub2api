@@ -93,3 +93,6 @@ jobs:
       - run: python -m pip install -r .github/release-tools/requirements-release.txt
       - run: python -m unittest discover -s .github/release-tools -p 'test_release_matrix.py'
       - run: bash -n .github/release-tools/release-images.sh
+      - run: python -m unittest discover -s .github/scripts -p 'test_fork*.py'
+      - run: bash -n .github/scripts/fork-sync.sh .github/scripts/fork-images.sh backend/scripts/resolve-version.sh deploy/install.sh
+      - run: bash deploy/tests/install-fork-version-test.sh

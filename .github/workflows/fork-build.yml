@@ -13,14 +13,14 @@ on:
 permissions:
   contents: write
   packages: write
-# The lock covers allocation through publication, across both callers. Never cancel
+# The lock covers allocation through publication for tag/manual releases. Never cancel
 # a running publisher; a retry reuses its immutable SHA-to-tag reservation.
 concurrency:
   group: fork-main-release
   cancel-in-progress: false
 jobs:
-  # Both entry points validate their exact source here. A GITHUB_TOKEN push
-  # from the sync workflow does not trigger standalone push workflows.
+  # Tag and manual entry points validate their exact source here.
+  # Scheduled upstream maintenance runs outside GitHub Actions.
   ci:
     uses: ./.github/workflows/backend-ci.yml
     permissions:

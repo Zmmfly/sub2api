@@ -31,12 +31,23 @@ bash -n .github/release-tools/release-images.sh
 
 ## Zmmfly fork main releases
 
-`fork-latest.yml` (main pushes/manual runs) and `fork-sync.yml` (upstream main
-merge every 12 hours/manual runs) call the same serialized `fork-build.yml`.
-GITHUB_TOKEN pushes do not recursively start workflows: sync explicitly calls
-publication with the merge SHA. The former development branch is no longer a
-sync or publication target. Merge conflicts stop before pushing; preserve fork
-traffic statistics and compression when repairing them.
+`fork-latest.yml` accepts newly created canonical `z<base>-N` tags and manual
+runs, then calls the serialized `fork-build.yml`. Ordinary main pushes do not
+start publication. CI and security checks must pass on the exact selected SHA
+before building or publishing any release artifacts.
+
+The assistant's external 12-hour maintenance task checks upstream main, resolves
+merges while preserving traffic statistics/compression, and creates an immutable
+version tag on the resulting fork main commit. That tag push triggers the same
+checks and release pipeline. No upstream changes means no new tag or release.
+There is no scheduled upstream-sync workflow or sync helper in GitHub Actions;
+the weekly security scan is independent and remains enabled. The former
+development branch is not a sync or publication target. Never discard fork
+changes with blanket ours/theirs conflict resolution or force-push main.
+
+Tag creation must use authorized user/app credentials: tags pushed by the
+workflow's built-in `GITHUB_TOKEN` do not start a new tag-push workflow. This
+repository does not store a PAT or add an Actions secret for external maintenance.
 
 `backend/cmd/server/VERSION` remains upstream-owned numeric metadata. Allocation
 reads it **at the selected commit**, then reserves `z<base>-N` as an annotated tag,
@@ -53,8 +64,8 @@ Linux runtime images are built (no simple/image-only mode). The numeric suffix
 is a **stable fork revision**, not a semantic-version prerelease. The helper
 publishes a draft only after all archives/checksums and images exist, explicitly
 sets prerelease=false, and promotes GitHub/GHCR latest only for the current main
-SHA. Normal upstream v-tag publishing remains available outside this fork;
-Zmmfly permits that workflow only as a nonpublishing dry run.
+SHA. The obsolete upstream release and CLA workflow entries have been removed;
+shared release tools and their tests remain in use.
 
 Publication never deletes or overwrites release assets. Draft retries verify
 existing bytes and upload missing assets. A completed release is hash-verified and reused without recompiling; verified
@@ -64,7 +75,8 @@ Versioned images are reused after label/platform verification on retries, while
 registry/authentication failures
 fail closed rather than treating a tag as absent. Immutable history is retained.
 A run interrupted between release publication and latest promotion can be rerun.
-No personal access token, DockerHub or notification secret is required.
+Publication itself uses the built-in `GITHUB_TOKEN`; no additional repository
+secret is required by the release workflow.
 
 Additional checks:
 

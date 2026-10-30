@@ -56,10 +56,9 @@ class ForkWorkflowTest(unittest.TestCase):
     def test_release_is_gated_by_same_commit_ci_and_security(self):
         validate_gate(self.build, self.ci, self.security)
 
-    def test_both_entry_points_use_gated_publisher(self):
+    def test_tag_and_manual_entry_use_gated_publisher(self):
         for filename, job, sha in [
             ('fork-latest.yml', 'release', '${{ needs.resolve.outputs.sha }}'),
-            ('fork-sync.yml', 'build', '${{ needs.sync.outputs.sha }}'),
         ]:
             workflow = read(filename)
             self.assertEqual(workflow['jobs'][job]['uses'], './.github/workflows/fork-build.yml')
@@ -72,7 +71,9 @@ class ForkWorkflowTest(unittest.TestCase):
         self.assertIn('HEAD^{commit}', resolver[1]['run'])
         self.assertIn('--tag "$REQUESTED_TAG"', resolver[1]['run'])
         self.assertEqual(read('fork-latest.yml')['jobs']['release']['with']['requested_tag'], '${{ needs.resolve.outputs.tag }}')
-        self.assertEqual(read('fork-sync.yml')['on']['schedule'], [{'cron': '17 */12 * * *'}])
+        self.assertFalse((WORKFLOWS / 'fork-sync.yml').exists())
+        for name in ['fork-latest.yml', 'fork-build.yml', 'backend-ci.yml']:
+            self.assertNotIn('schedule', read(name)['on'])
 
     def test_checks_retain_required_coverage(self):
         self.assertEqual(set(self.ci['jobs']), {'shell', 'test', 'frontend', 'golangci-lint', 'release-helpers'})
@@ -85,7 +86,7 @@ class ForkWorkflowTest(unittest.TestCase):
 
     def test_only_required_workflows_remain(self):
         self.assertEqual({p.name for p in WORKFLOWS.glob('*.yml')}, {
-            'backend-ci.yml', 'security-scan.yml', 'fork-build.yml', 'fork-latest.yml', 'fork-sync.yml'})
+            'backend-ci.yml', 'security-scan.yml', 'fork-build.yml', 'fork-latest.yml'})
         self.assertTrue((ROOT / '.github/release-tools/release_matrix.py').is_file())
 
     def test_contract_rejects_bypassing_or_mismatching_checks(self):

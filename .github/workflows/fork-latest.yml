@@ -1,26 +1,37 @@
-name: Fork main push and manual release
+name: Fork tag and manual release
 on:
   push:
-    branches: [main]
+    tags: ['z*']
   workflow_dispatch:
 permissions:
   contents: write
   packages: write
 jobs:
   resolve:
-    if: github.repository == 'Zmmfly/sub2api'
+    if: github.repository == 'Zmmfly/sub2api' && (github.event_name == 'workflow_dispatch' || github.event.created == true)
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.source.outputs.sha }}
+      tag: ${{ steps.source.outputs.tag }}
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'push' && github.sha || 'main' }}
+          fetch-depth: 0
           persist-credentials: false
       - id: source
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        env:
+          REQUESTED_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+        run: |
+          sha=$(git rev-parse HEAD^{commit})
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if [[ -n "$REQUESTED_TAG" ]]; then
+            # Validate and peel the existing tag; never allocate another one.
+            python .github/scripts/fork-release.py allocate --sha "$sha" --tag "$REQUESTED_TAG"
+          fi
   release:
     needs: resolve
     uses: ./.github/workflows/fork-build.yml
     with:
       source_sha: ${{ needs.resolve.outputs.sha }}
+      requested_tag: ${{ needs.resolve.outputs.tag }}

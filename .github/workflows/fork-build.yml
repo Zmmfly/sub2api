@@ -5,6 +5,11 @@ on:
       source_sha:
         type: string
         required: true
+      requested_tag:
+        description: Existing canonical tag for tag-triggered publication
+        type: string
+        required: false
+        default: ''
 permissions:
   contents: write
   packages: write
@@ -45,6 +50,7 @@ jobs:
         id: version
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
+          REQUESTED_TAG: ${{ inputs.requested_tag }}
         run: |
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -57,7 +63,9 @@ jobs:
           echo 'active=true' >> "$GITHUB_OUTPUT"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          python .github/scripts/fork-release.py allocate --sha "$SOURCE_SHA" --push
+          args=(--sha "$SOURCE_SHA" --push)
+          if [[ -n "$REQUESTED_TAG" ]]; then args+=(--tag "$REQUESTED_TAG"); fi
+          python .github/scripts/fork-release.py allocate "${args[@]}"
       - name: Check completed release (idempotent retry)
         if: steps.version.outputs.active == 'true'
         id: status

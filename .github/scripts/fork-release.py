@@ -43,6 +43,17 @@ def choose_version(base, sha, tags):
     return f'z{base}-{max(numbers, default=0) + 1}'
 
 
+def requested_version(base, sha, tags, requested_tag):
+    """Validate a user-created tag without allocating or mutating any ref."""
+    if not TAG.fullmatch(requested_tag):
+        raise ValueError('requested tag must use canonical z<upstream-version>-<N> format')
+    if tags.get(requested_tag) != sha:
+        raise ValueError('requested tag does not identify the selected commit')
+    if choose_version(base, sha, tags) != requested_tag:
+        raise ValueError('requested tag disagrees with the source version reservation')
+    return requested_tag
+
+
 def allocate(args):
     if not SHA.fullmatch(args.sha):
         raise ValueError('source must be a full commit SHA')
@@ -50,8 +61,9 @@ def allocate(args):
     base = run('git', 'show', f'{sha}:backend/cmd/server/VERSION')
     tags = {tag: run('git', 'rev-parse', '--verify', f'refs/tags/{tag}^{{commit}}')
             for tag in run('git', 'tag', '--list', 'z*').splitlines() if TAG.fullmatch(tag)}
-    tag = choose_version(base, sha, tags)
-    if args.push:
+    requested_tag = getattr(args, 'tag', None)
+    tag = requested_version(base, sha, tags, requested_tag) if requested_tag else choose_version(base, sha, tags)
+    if args.push and not requested_tag:
         if tag not in tags:
             run('git', 'tag', '-a', tag, sha, '-m', f'Sub2API {tag}\n\nUpstream version: {base}\nSource: {sha}')
         # No --force: a conflicting allocation is an error, never rewritten.
@@ -250,6 +262,7 @@ def main():
     command = commands.add_parser('allocate')
     command.add_argument('--sha', required=True)
     command.add_argument('--push', action='store_true')
+    command.add_argument('--tag', help='Validate and reuse an existing canonical tag without creating or pushing tags')
     command.set_defaults(handler=allocate)
     command = commands.add_parser('publish')
     command.add_argument('--tag', required=True)

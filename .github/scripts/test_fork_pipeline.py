@@ -63,13 +63,14 @@ class ForkPipelineTest(unittest.TestCase):
         build = yaml.safe_load((ROOT / '.github/workflows/fork-build.yml').read_text())
         self.assertEqual(build['concurrency'], {'group': 'fork-main-release', 'cancel-in-progress': False})
         latest = (ROOT / '.github/workflows/fork-latest.yml').read_text()
-        self.assertIn('branches: [main]', latest)
+        self.assertIn("tags: ['z*']", latest)
+        self.assertNotIn('branches:', latest)
         self.assertNotIn('dev/traffic-stat', latest)
         sync = (ROOT / '.github/scripts/fork-sync.sh').read_text()
         self.assertNotIn('refs/heads/dev', sync)
         self.assertNotIn('--force', sync)
         source = (ROOT / '.github/workflows/fork-build.yml').read_text()
-        self.assertLess(source.index('Source is no longer main tip'), source.index(' allocate --sha'))
+        self.assertLess(source.index('Source is no longer main tip'), source.index(' allocate "${args[@]}"'))
         self.assertNotIn('secrets.DOCKERHUB', source)
 
 

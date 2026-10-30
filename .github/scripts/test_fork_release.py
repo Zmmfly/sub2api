@@ -65,6 +65,41 @@ class AllocationTests(unittest.TestCase):
                 os.chdir(previous)
 
 
+class RequestedTagTests(unittest.TestCase):
+    def test_reuses_requested_tag_without_allocating_a_new_number(self):
+        self.assertEqual(release.requested_version('0.2.19', SHA, {TAG: SHA}, TAG), TAG)
+
+    def test_rejects_noncanonical_missing_wrong_source_and_wrong_base(self):
+        cases = [
+            ('0.2.19', SHA, {TAG: SHA}, 'v0.2.19'),
+            ('0.2.19', SHA, {'z0.2.19-0': SHA}, 'z0.2.19-0'),
+            ('0.2.19', SHA, {'z0.2.19-01': SHA}, 'z0.2.19-01'),
+            ('0.2.19', SHA, {}, TAG),
+            ('0.2.19', SHA, {TAG: OTHER}, TAG),
+            ('0.2.20', SHA, {TAG: SHA}, TAG),
+            ('0.2.19', SHA, {TAG: SHA, 'z0.2.19-2': SHA}, TAG),
+        ]
+        for args in cases:
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                release.requested_version(*args)
+
+    def test_tag_trigger_never_pushes_or_creates_tags(self):
+        def fake_run(*args):
+            if args == ('git', 'rev-parse', '--verify', SHA + '^{commit}'):
+                return SHA
+            if args == ('git', 'show', f'{SHA}:backend/cmd/server/VERSION'):
+                return '0.2.19'
+            if args == ('git', 'tag', '--list', 'z*'):
+                return TAG
+            if args == ('git', 'rev-parse', '--verify', f'refs/tags/{TAG}^{{commit}}'):
+                return SHA
+            if args == ('git', 'show', '-s', '--format=%ct', SHA):
+                return '1700000000'
+            raise AssertionError('Unexpected mutating or additional command: ' + repr(args))
+        with patch.object(release, 'run', side_effect=fake_run):
+            release.allocate(argparse.Namespace(sha=SHA, push=True, tag=TAG))
+
+
 class ReleaseLookupTests(unittest.TestCase):
     view = {'tagName': TAG, 'isDraft': True, 'isPrerelease': False, 'assets': []}
 

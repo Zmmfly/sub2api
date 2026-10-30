@@ -64,7 +64,14 @@ class ForkWorkflowTest(unittest.TestCase):
             workflow = read(filename)
             self.assertEqual(workflow['jobs'][job]['uses'], './.github/workflows/fork-build.yml')
             self.assertEqual(workflow['jobs'][job]['with']['source_sha'], sha)
-        self.assertEqual(read('fork-latest.yml')['on']['push']['branches'], ['main'])
+        self.assertEqual(read('fork-latest.yml')['on']['push'], {'tags': ['z*']})
+        self.assertIn('workflow_dispatch', read('fork-latest.yml')['on'])
+        self.assertIn('github.event.created == true', read('fork-latest.yml')['jobs']['resolve']['if'])
+        resolver = read('fork-latest.yml')['jobs']['resolve']['steps']
+        self.assertEqual(resolver[0]['with']['ref'], "${{ github.event_name == 'push' && github.sha || 'main' }}")
+        self.assertIn('HEAD^{commit}', resolver[1]['run'])
+        self.assertIn('--tag "$REQUESTED_TAG"', resolver[1]['run'])
+        self.assertEqual(read('fork-latest.yml')['jobs']['release']['with']['requested_tag'], '${{ needs.resolve.outputs.tag }}')
         self.assertEqual(read('fork-sync.yml')['on']['schedule'], [{'cron': '17 */12 * * *'}])
 
     def test_checks_retain_required_coverage(self):

@@ -1,8 +1,14 @@
 name: Security Scan
 
 on:
-  push:
   pull_request:
+    branches: [main]
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact commit validated for the calling release
+        type: string
+        required: true
   schedule:
     - cron: '0 3 * * 1'
 
@@ -15,6 +21,15 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
+      - name: Verify requested source commit
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
@@ -34,6 +49,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
+      - name: Verify requested source commit
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
       - name: Set up pnpm
         uses: pnpm/action-setup@v6
         with:

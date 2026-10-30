@@ -14,7 +14,22 @@ concurrency:
   group: fork-main-release
   cancel-in-progress: false
 jobs:
+  # Both entry points validate their exact source here. A GITHUB_TOKEN push
+  # from the sync workflow does not trigger standalone push workflows.
+  ci:
+    uses: ./.github/workflows/backend-ci.yml
+    permissions:
+      contents: read
+    with:
+      source_sha: ${{ inputs.source_sha }}
+  security:
+    uses: ./.github/workflows/security-scan.yml
+    permissions:
+      contents: read
+    with:
+      source_sha: ${{ inputs.source_sha }}
   release:
+    needs: [ci, security]
     if: github.repository == 'Zmmfly/sub2api'
     runs-on: ubuntu-latest
     timeout-minutes: 90

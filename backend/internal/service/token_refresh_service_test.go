@@ -491,6 +491,17 @@ func TestTokenRefreshService_RefreshWithRetry_Antigravity(t *testing.T) {
 		},
 	}
 	service := NewTokenRefreshService(repo, nil, nil, nil, nil, invalidator, nil, cfg, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	privacyCalls := 0
+	service.antigravityPrivacySetter = func(gotCtx context.Context, token, projectID, proxyURL string) string {
+		privacyCalls++
+		require.Equal(t, ctx, gotCtx)
+		require.Equal(t, "ag-token", token)
+		require.Empty(t, projectID)
+		require.Empty(t, proxyURL)
+		return AntigravityPrivacyFailed
+	}
 	account := &Account{
 		ID:       8,
 		Platform: PlatformAntigravity,
@@ -502,10 +513,46 @@ func TestTokenRefreshService_RefreshWithRetry_Antigravity(t *testing.T) {
 		},
 	}
 
-	err := service.refreshWithRetry(context.Background(), account, refresher, refresher, time.Hour)
+	err := service.refreshWithRetry(ctx, account, refresher, refresher, time.Hour)
 	require.NoError(t, err)
 	require.Equal(t, 1, repo.updateCalls)
 	require.Equal(t, 1, invalidator.calls) // Antigravity 也应触发缓存失效
+	require.Equal(t, 1, privacyCalls)
+	require.Equal(t, AntigravityPrivacyFailed, account.Extra["privacy_mode"])
+}
+
+func TestTokenRefreshService_AntigravityPrivacyIsPerInstance(t *testing.T) {
+	for _, mode := range []string{AntigravityPrivacySet, AntigravityPrivacyFailed} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			repo := &tokenRefreshAccountRepo{}
+			service := NewTokenRefreshService(repo, nil, nil, nil, nil, nil, nil, nil, nil)
+			require.NotNil(t, service.antigravityPrivacySetter)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			service.antigravityPrivacySetter = func(gotCtx context.Context, token, projectID, proxyURL string) string {
+				calls++
+				require.Equal(t, ctx, gotCtx)
+				require.Equal(t, "fixture-"+mode, token)
+				require.Equal(t, "project-"+mode, projectID)
+				require.Empty(t, proxyURL)
+				return mode
+			}
+			account := &Account{
+				ID: 8, Platform: PlatformAntigravity, Type: AccountTypeOAuth,
+				Credentials: map[string]any{
+					"access_token": "fixture-" + mode,
+					"project_id":   "project-" + mode,
+				},
+			}
+			service.ensureAntigravityPrivacy(ctx, account)
+			require.Equal(t, 1, calls)
+			require.Equal(t, 1, repo.updateExtraCalls)
+			require.Equal(t, map[string]any{"privacy_mode": mode}, repo.lastExtraUpdates)
+			require.Equal(t, mode, account.Extra["privacy_mode"])
+		})
+	}
 }
 
 func TestAntigravityTokenRefresher_NeedsRefresh_ForceRefreshMarker(t *testing.T) {

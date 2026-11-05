@@ -3,8 +3,12 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -163,7 +167,7 @@ func TestFetchChatGPTAccountInfo_ReportsAccountID(t *testing.T) {
 	chatGPTAccountsCheckURL = server.URL + "/backend-api/accounts/check/v4-2023-04-27"
 	t.Cleanup(func() { chatGPTAccountsCheckURL = oldURL })
 
-	got := fetchChatGPTAccountInfo(context.Background(), newTestPrivacyClientFactory(), "access-token", "", "")
+	got := fetchChatGPTAccountInfo(context.Background(), newTestPrivacyClientFactory(t, server.URL, "access-token"), "access-token", "", "")
 	require.NotNil(t, got)
 	require.Equal(t, "plus", got.PlanType)
 	require.Equal(t, "personal-account-a", got.AccountID, "应优先取 account.account_id 而不是 map key")
@@ -210,8 +214,9 @@ func TestEnrichTokenInfo_WorkspaceEntitlementDoesNotOverridePersonalSubscription
 		OrganizationID:   workspaceAccountID,
 		PlanType:         "pro", // 来自 id_token 的个人套餐
 	}
-	svc := &OpenAIOAuthService{privacyClientFactory: newTestPrivacyClientFactory()}
+	svc := &OpenAIOAuthService{privacyClientFactory: newTestPrivacyClientFactory(t, server.URL, "access-token")}
 	svc.enrichTokenInfo(context.Background(), tokenInfo, "")
+	require.Equal(t, PrivacyModeTrainingOff, tokenInfo.PrivacyMode)
 
 	require.Equal(t, "pro", tokenInfo.PlanType)
 	require.Equal(t, personalActiveUntil, tokenInfo.SubscriptionExpiresAt,
@@ -253,8 +258,9 @@ func TestEnrichTokenInfo_KeepsEntitlementWhenAccountMatches(t *testing.T) {
 		OrganizationID:   personalAccountID,
 		PlanType:         "plus",
 	}
-	svc := &OpenAIOAuthService{privacyClientFactory: newTestPrivacyClientFactory()}
+	svc := &OpenAIOAuthService{privacyClientFactory: newTestPrivacyClientFactory(t, server.URL, "access-token")}
 	svc.enrichTokenInfo(context.Background(), tokenInfo, "")
+	require.Equal(t, PrivacyModeTrainingOff, tokenInfo.PrivacyMode)
 
 	require.Equal(t, entitlementExpiresAt, tokenInfo.SubscriptionExpiresAt)
 	require.Zero(t, subscriptionCalls, "账号一致时不应额外请求订阅端点")
@@ -293,8 +299,9 @@ func TestEnrichTokenInfo_WorkspacePlanTypeKeepsItsOwnExpiry(t *testing.T) {
 		OrganizationID:   workspaceAccountID,
 		// id_token 没带 chatgpt_plan_type
 	}
-	svc := &OpenAIOAuthService{privacyClientFactory: newTestPrivacyClientFactory()}
+	svc := &OpenAIOAuthService{privacyClientFactory: newTestPrivacyClientFactory(t, server.URL, "access-token")}
 	svc.enrichTokenInfo(context.Background(), tokenInfo, "")
+	require.Equal(t, PrivacyModeTrainingOff, tokenInfo.PrivacyMode)
 
 	require.Equal(t, "self_serve_business_usage_based", tokenInfo.PlanType)
 	require.Equal(t, workspaceExpiresAt, tokenInfo.SubscriptionExpiresAt,
@@ -336,11 +343,56 @@ func newChatGPTBackendTestServer(t *testing.T, cfg chatGPTBackendTestServerConfi
 	return server
 }
 
-// enrichTokenInfo 收尾还会调用 disableOpenAITraining，它的 URL 是常量、指向真实
-// chatgpt.com，测试无法接管。给客户端一个短超时让它快速失败——该调用只写
-// PrivacyMode，不影响本组用例的断言。
-func newTestPrivacyClientFactory() PrivacyClientFactory {
-	return func(string) (*req.Client, error) {
-		return req.C().SetTimeout(time.Second), nil
+// newTestPrivacyClientFactory intercepts the privacy PATCH and permits only the
+// exact local backend fixture origin. Unexpected requests fail before transport.
+func newTestPrivacyClientFactory(t *testing.T, serverURL, accessToken string) PrivacyClientFactory {
+	t.Helper()
+	localURL, err := url.Parse(serverURL)
+	require.NoError(t, err)
+	return func(proxyURL string) (*req.Client, error) {
+		if proxyURL != "" {
+			t.Error("unexpected proxy in backend fixture")
+			return nil, errors.New("unexpected proxy in backend fixture")
+		}
+		client := req.C().SetTimeout(time.Second)
+		client.Transport.WrapRoundTripFunc(func(next http.RoundTripper) req.HttpRoundTripFunc {
+			return func(r *http.Request) (*http.Response, error) {
+				reject := func() (*http.Response, error) {
+					t.Error("unexpected backend fixture request")
+					return nil, errors.New("unexpected backend fixture request")
+				}
+				// Compare without printing the supplied Authorization value on failure.
+				if r.Header.Get("Authorization") != "Bearer "+accessToken || r.URL.User != nil {
+					return reject()
+				}
+				if r.URL.Scheme == "https" && r.URL.Host == "chatgpt.com" && r.URL.Path == "/backend-api/settings/account_user_setting" {
+					query, err := url.ParseQuery(r.URL.RawQuery)
+					if err != nil || r.Method != http.MethodPatch || r.URL.RawPath != "" || r.URL.Fragment != "" ||
+						len(query) != 2 || len(query["feature"]) != 1 || query.Get("feature") != "training_allowed" ||
+						len(query["value"]) != 1 || query.Get("value") != "false" {
+						return reject()
+					}
+					if r.Body != nil {
+						body, err := io.ReadAll(r.Body)
+						_ = r.Body.Close()
+						if err != nil || len(body) != 0 {
+							return reject()
+						}
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(`{}`)),
+						Request:    r,
+					}, nil
+				}
+				if r.URL.Scheme != localURL.Scheme || r.URL.Host != localURL.Host || r.Method != http.MethodGet ||
+					(r.URL.Path != "/backend-api/accounts/check/v4-2023-04-27" && r.URL.Path != "/backend-api/subscriptions") {
+					return reject()
+				}
+				return next.RoundTrip(r)
+			}
+		})
+		return client, nil
 	}
 }

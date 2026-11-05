@@ -70,6 +70,9 @@ type TokenRefreshService struct {
 	privacyClientFactory PrivacyClientFactory
 	proxyRepo            ProxyRepository
 
+	// Per-instance seam keeps refresh tests from changing remote privacy settings.
+	antigravityPrivacySetter func(context.Context, string, string, string) string
+
 	stopCh        chan struct{}
 	stopOnce      sync.Once
 	wg            sync.WaitGroup
@@ -104,15 +107,16 @@ func NewTokenRefreshService(
 	}
 	runCtx, runCancel := context.WithCancel(context.Background())
 	s := &TokenRefreshService{
-		accountRepo:      accountRepo,
-		refreshPolicy:    DefaultBackgroundRefreshPolicy(),
-		cfg:              refreshCfg,
-		cacheInvalidator: cacheInvalidator,
-		schedulerCache:   schedulerCache,
-		tempUnschedCache: tempUnschedCache,
-		stopCh:           make(chan struct{}),
-		runCtx:           runCtx,
-		runCancel:        runCancel,
+		accountRepo:              accountRepo,
+		refreshPolicy:            DefaultBackgroundRefreshPolicy(),
+		cfg:                      refreshCfg,
+		cacheInvalidator:         cacheInvalidator,
+		schedulerCache:           schedulerCache,
+		tempUnschedCache:         tempUnschedCache,
+		stopCh:                   make(chan struct{}),
+		runCtx:                   runCtx,
+		runCancel:                runCancel,
+		antigravityPrivacySetter: setAntigravityPrivacy,
 	}
 	if pager, ok := accountRepo.(OAuthRefreshCandidatePager); ok {
 		s.candidatePager = pager
@@ -1508,7 +1512,11 @@ func (s *TokenRefreshService) ensureAntigravityPrivacy(ctx context.Context, acco
 		}
 	}
 
-	mode := setAntigravityPrivacy(ctx, token, projectID, proxyURL)
+	setPrivacy := s.antigravityPrivacySetter
+	if setPrivacy == nil {
+		setPrivacy = setAntigravityPrivacy
+	}
+	mode := setPrivacy(ctx, token, projectID, proxyURL)
 	if mode == "" {
 		return
 	}

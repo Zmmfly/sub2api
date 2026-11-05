@@ -50,12 +50,13 @@ const (
 )
 
 type GeminiOAuthService struct {
-	sessionStore *geminicli.SessionStore
-	proxyRepo    ProxyRepository
-	oauthClient  GeminiOAuthClient
-	codeAssist   GeminiCliCodeAssistClient
-	driveClient  geminicli.DriveClient
-	cfg          *config.Config
+	sessionStore                 *geminicli.SessionStore
+	proxyRepo                    ProxyRepository
+	oauthClient                  GeminiOAuthClient
+	codeAssist                   GeminiCliCodeAssistClient
+	driveClient                  geminicli.DriveClient
+	cfg                          *config.Config
+	resourceManagerProjectLookup func(context.Context, string, string) (string, error)
 }
 
 type GeminiOAuthCapabilities struct {
@@ -71,12 +72,13 @@ func NewGeminiOAuthService(
 	cfg *config.Config,
 ) *GeminiOAuthService {
 	return &GeminiOAuthService{
-		sessionStore: geminicli.NewSessionStore(),
-		proxyRepo:    proxyRepo,
-		oauthClient:  oauthClient,
-		codeAssist:   codeAssist,
-		driveClient:  driveClient,
-		cfg:          cfg,
+		sessionStore:                 geminicli.NewSessionStore(),
+		proxyRepo:                    proxyRepo,
+		oauthClient:                  oauthClient,
+		codeAssist:                   codeAssist,
+		driveClient:                  driveClient,
+		cfg:                          cfg,
+		resourceManagerProjectLookup: fetchProjectIDFromResourceManager,
 	}
 }
 
@@ -954,7 +956,7 @@ func (s *GeminiOAuthService) fetchProjectID(ctx context.Context, accessToken, pr
 			logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] User has tier (%s) but no cloudaicompanionProject, trying Cloud Resource Manager...", registeredTierID)
 
 			// Try to get project from Cloud Resource Manager
-			fallback, fbErr := fetchProjectIDFromResourceManager(ctx, accessToken, proxyURL)
+			fallback, fbErr := s.lookupResourceManagerProject(ctx, accessToken, proxyURL)
 			if fbErr == nil && strings.TrimSpace(fallback) != "" {
 				logger.LegacyPrintf("service.gemini_oauth", "[GeminiOAuth] Found project from Cloud Resource Manager: %s", fallback)
 				return strings.TrimSpace(fallback), tierID, nil
@@ -983,7 +985,7 @@ func (s *GeminiOAuthService) fetchProjectID(ctx context.Context, accessToken, pr
 		resp, err := s.codeAssist.OnboardUser(ctx, accessToken, proxyURL, req)
 		if err != nil {
 			// If Code Assist onboarding fails (e.g. INVALID_ARGUMENT), fallback to Cloud Resource Manager projects.
-			fallback, fbErr := fetchProjectIDFromResourceManager(ctx, accessToken, proxyURL)
+			fallback, fbErr := s.lookupResourceManagerProject(ctx, accessToken, proxyURL)
 			if fbErr == nil && strings.TrimSpace(fallback) != "" {
 				return strings.TrimSpace(fallback), tierID, nil
 			}
@@ -1001,7 +1003,7 @@ func (s *GeminiOAuthService) fetchProjectID(ctx context.Context, accessToken, pr
 				}
 			}
 
-			fallback, fbErr := fetchProjectIDFromResourceManager(ctx, accessToken, proxyURL)
+			fallback, fbErr := s.lookupResourceManagerProject(ctx, accessToken, proxyURL)
 			if fbErr == nil && strings.TrimSpace(fallback) != "" {
 				return strings.TrimSpace(fallback), tierID, nil
 			}
@@ -1010,7 +1012,7 @@ func (s *GeminiOAuthService) fetchProjectID(ctx context.Context, accessToken, pr
 		time.Sleep(2 * time.Second)
 	}
 
-	fallback, fbErr := fetchProjectIDFromResourceManager(ctx, accessToken, proxyURL)
+	fallback, fbErr := s.lookupResourceManagerProject(ctx, accessToken, proxyURL)
 	if fbErr == nil && strings.TrimSpace(fallback) != "" {
 		return strings.TrimSpace(fallback), tierID, nil
 	}
@@ -1028,6 +1030,16 @@ type googleCloudProject struct {
 
 type googleCloudProjectsResponse struct {
 	Projects []googleCloudProject `json:"projects"`
+}
+
+// lookupResourceManagerProject keeps the fallback injectable per service instance
+// without replacing shared HTTP clients or changing the production lookup.
+func (s *GeminiOAuthService) lookupResourceManagerProject(ctx context.Context, accessToken, proxyURL string) (string, error) {
+	lookup := s.resourceManagerProjectLookup
+	if lookup == nil {
+		lookup = fetchProjectIDFromResourceManager
+	}
+	return lookup(ctx, accessToken, proxyURL)
 }
 
 func fetchProjectIDFromResourceManager(ctx context.Context, accessToken, proxyURL string) (string, error) {

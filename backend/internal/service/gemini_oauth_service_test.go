@@ -1194,7 +1194,7 @@ func TestGeminiOAuthService_RefreshAccountToken_CodeAssist_NoProjectID_FailsEmpt
 	}
 
 	// 返回有 currentTier 但无 cloudaicompanionProject 的响应，
-	// 使 fetchProjectID 走"已注册用户"路径（尝试 Cloud Resource Manager -> 失败 -> 返回错误），
+	// 使 fetchProjectID 走"已注册用户"路径（注入 Cloud Resource Manager 失败 -> 返回错误），
 	// 避免走 onboardUser 路径（5 次重试 x 2 秒 = 10 秒超时）
 	codeAssist := &mockGeminiCodeAssistClient{
 		loadCodeAssistFunc: func(ctx context.Context, accessToken, proxyURL string, req *geminicli.LoadCodeAssistRequest) (*geminicli.LoadCodeAssistResponse, error) {
@@ -1207,6 +1207,14 @@ func TestGeminiOAuthService_RefreshAccountToken_CodeAssist_NoProjectID_FailsEmpt
 
 	svc := NewGeminiOAuthService(&mockGeminiProxyRepo{}, client, codeAssist, nil, &config.Config{})
 	defer svc.Stop()
+	lookupCalls := 0
+	svc.resourceManagerProjectLookup = func(ctx context.Context, accessToken, proxyURL string) (string, error) {
+		lookupCalls++
+		if ctx == nil || accessToken != "at" || proxyURL != "" {
+			t.Fatalf("unexpected Resource Manager lookup arguments: ctx=%v token=%q proxy=%q", ctx, accessToken, proxyURL)
+		}
+		return "", fmt.Errorf("Resource Manager unavailable in test")
+	}
 
 	account := &Account{
 		Platform: PlatformGemini,
@@ -1218,11 +1226,47 @@ func TestGeminiOAuthService_RefreshAccountToken_CodeAssist_NoProjectID_FailsEmpt
 	}
 
 	_, err := svc.RefreshAccountToken(context.Background(), account)
+	if lookupCalls != 1 {
+		t.Fatalf("Resource Manager lookup calls: got=%d want=1", lookupCalls)
+	}
 	if err == nil {
 		t.Fatal("应返回错误（无法检测 project_id）")
 	}
 	if !strings.Contains(err.Error(), "project_id") {
 		t.Fatalf("错误信息应包含 project_id: got=%q", err.Error())
+	}
+}
+
+func TestGeminiOAuthService_ResourceManagerLookupIsPerInstance(t *testing.T) {
+	t.Parallel()
+
+	for _, projectID := range []string{"project-one", "project-two"} {
+		t.Run(projectID, func(t *testing.T) {
+			t.Parallel()
+			codeAssist := &mockGeminiCodeAssistClient{
+				loadCodeAssistFunc: func(context.Context, string, string, *geminicli.LoadCodeAssistRequest) (*geminicli.LoadCodeAssistResponse, error) {
+					return &geminicli.LoadCodeAssistResponse{CurrentTier: &geminicli.TierInfo{ID: "STANDARD"}}, nil
+				},
+			}
+			svc := NewGeminiOAuthService(nil, nil, codeAssist, nil, &config.Config{})
+			t.Cleanup(svc.Stop)
+			if svc.resourceManagerProjectLookup == nil {
+				t.Fatal("constructor must retain the production Resource Manager lookup")
+			}
+			calls := 0
+			ctx := context.Background()
+			svc.resourceManagerProjectLookup = func(gotCtx context.Context, token, proxy string) (string, error) {
+				calls++
+				if gotCtx != ctx || token != "fixture-token" || proxy != "fixture-proxy" {
+					t.Fatal("Resource Manager lookup arguments were not preserved")
+				}
+				return " " + projectID + " ", nil
+			}
+			got, tier, err := svc.fetchProjectID(ctx, "fixture-token", "fixture-proxy")
+			if err != nil || got != projectID || tier != "STANDARD" || calls != 1 {
+				t.Fatalf("unexpected fallback result: project=%q tier=%q calls=%d err=%v", got, tier, calls, err)
+			}
+		})
 	}
 }
 

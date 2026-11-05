@@ -57,12 +57,13 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 	if len(work) == 0 {
 		return send(req)
 	}
+	levels := r.compressionLevels(req.Context())
 	lastStatus := 0
 	for len(work) > 0 {
 		algorithm := work[0]
 		work = work[1:]
 
-		attempt, err := encodeRequest(req, algorithm)
+		attempt, err := encodeRequestWithLevels(req, algorithm, levels)
 		if err != nil {
 			slog.Warn("reqcompress encode failed", "account_id", accountID,
 				"algorithm", algorithm, "host", logHost(req), "method", req.Method, "error", err)

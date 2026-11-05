@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/compresslevel"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/traffic"
 )
 
@@ -67,10 +68,10 @@ func isSignedRequest(header http.Header) bool {
 	return headerValue(header, "X-Amz-Content-Sha256") != ""
 }
 
-// encodeRequest returns a replayable clone of req whose body is compressed with
-// algorithm. The original request is left untouched so the caller can fall back
-// to identity after a rejected coding.
-func encodeRequest(req *http.Request, algorithm Algorithm) (*http.Request, error) {
+// encodeRequestWithLevels returns a replayable clone of req whose body is
+// compressed with algorithm. The original request is left untouched so the
+// caller can fall back to identity after a rejected coding.
+func encodeRequestWithLevels(req *http.Request, algorithm Algorithm, levels compresslevel.Settings) (*http.Request, error) {
 	body, err := req.GetBody()
 	if err != nil {
 		return nil, err
@@ -86,7 +87,7 @@ func encodeRequest(req *http.Request, algorithm Algorithm) (*http.Request, error
 	if int64(len(original)) > MaxCompressibleBodyBytes {
 		return nil, ErrBodyTooLarge
 	}
-	encoded, err := encodeBody(algorithm, original)
+	encoded, err := encodeBodyWithLevels(algorithm, original, levels)
 	if err != nil {
 		return nil, err
 	}

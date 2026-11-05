@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/compresslevel"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/traffic"
 	"github.com/andybalholm/brotli"
@@ -23,8 +24,6 @@ const (
 	headerVary           = "Vary"
 	headerContentLength  = "Content-Length"
 
-	// brotli 压缩质量：5 在压缩率与延迟之间取平衡，适合 SSE 等流式响应。
-	brotliCompressQuality = 5
 	// brotliDefaultWindowSize 等价于旧版 brotli 包的 DefaultWindowSize（LGWin=22）；
 	// go.mod 中的 brotli v1.2.0 改为 WriterOptions 结构体传参，此处保持语义一致。
 	brotliDefaultWindowSize = 22
@@ -56,6 +55,7 @@ type compressResponseWriter struct {
 	gin.ResponseWriter
 	encoding   string          // 协商出的编码：br / gzip / deflate
 	ctx        context.Context // Close/Flush 出错时用于记录日志
+	levels     compresslevel.Settings
 	compressor compressFlusher
 	state      compressState
 	traffic    *traffic.Counter
@@ -76,7 +76,11 @@ var _ gin.ResponseWriter = (*compressResponseWriter)(nil)
 // 编码选择遵循 RFC 9110：有效 q 值最大的编码优先，平局时按 br > gzip > deflate
 // 的服务器偏好决定；未携带 Accept-Encoding、受支持编码全部 q=0 或仅 identity
 // 时不压缩。
-func ResponseCompress() gin.HandlerFunc {
+func ResponseCompress(providers ...compresslevel.Provider) gin.HandlerFunc {
+	var provider compresslevel.Provider
+	if len(providers) > 0 {
+		provider = providers[0]
+	}
 	return func(c *gin.Context) {
 		if c.Request == nil {
 			c.Next()
@@ -90,10 +94,15 @@ func ResponseCompress() gin.HandlerFunc {
 		// 无论协商结果如何都包装 Writer：encoding 为空时不压缩，包装器仅
 		// 在提交响应头时统一保证 Vary/ETag 的缓存语义不被 handler 覆盖。
 		appendVaryAcceptEncoding(c.Writer.Header())
+		levels := compresslevel.Default()
+		if encoding != "" {
+			levels = compresslevel.Resolve(c.Request.Context(), provider)
+		}
 		writer := &compressResponseWriter{
 			ResponseWriter: c.Writer,
 			encoding:       encoding,
 			ctx:            c.Request.Context(),
+			levels:         levels,
 			traffic:        traffic.ResponseCounter(c.Request.Context()),
 			head:           c.Request.Method == http.MethodHead,
 		}
@@ -357,7 +366,7 @@ func (w *compressResponseWriter) initCompressor() {
 		// handler/上游已设置编码，不重复压缩
 		return
 	}
-	compressor, err := newCompressor(w.ResponseWriter, w.encoding)
+	compressor, err := newCompressorWithLevels(w.ResponseWriter, w.encoding, w.levels)
 	if err != nil {
 		logCompressError(w.ctx, "create response compressor", w.encoding, err)
 		return
@@ -389,20 +398,19 @@ func (w *compressResponseWriter) close() {
 	}
 }
 
-// newCompressor 按编码创建压缩器：gzip/deflate 使用标准库默认压缩级；
-// deflate 按 RFC 9110 §8.4.1.2 写 zlib 包装格式（RFC 1950），而非原始 deflate 流；
-// br 使用 brotli 质量 5 以平衡压缩率与 SSE 首字节延迟。
-func newCompressor(dst io.Writer, encoding string) (compressFlusher, error) {
+// newCompressorWithLevels 按编码和请求快照创建压缩器。deflate 按
+// RFC 9110 §8.4.1.2 写 zlib 包装格式（RFC 1950），而非原始 deflate 流。
+func newCompressorWithLevels(dst io.Writer, encoding string, levels compresslevel.Settings) (compressFlusher, error) {
 	switch encoding {
 	case "br":
 		return brotli.NewWriterOptions(dst, brotli.WriterOptions{
-			Quality: brotliCompressQuality,
+			Quality: levels.Brotli,
 			LGWin:   brotliDefaultWindowSize,
 		}), nil
 	case "gzip":
-		return gzip.NewWriter(dst), nil
+		return gzip.NewWriterLevel(dst, levels.Gzip)
 	case "deflate":
-		return zlib.NewWriter(dst), nil
+		return zlib.NewWriterLevel(dst, levels.Deflate)
 	default:
 		return nil, fmt.Errorf("unsupported content encoding: %s", encoding)
 	}

@@ -19,20 +19,42 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/compresslevel"
 	"github.com/redis/go-redis/v9"
 )
 
 // Registry holds the local per-account switch and negotiation cache. The
 // optional shared client is used only to initialize and update negotiated state.
 type Registry struct {
-	mu      sync.RWMutex
-	entries map[int64]*entry
-	shared  *redis.Client
+	mu            sync.RWMutex
+	entries       map[int64]*entry
+	shared        *redis.Client
+	levelProvider compresslevel.Provider
 }
 
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry {
 	return &Registry{entries: make(map[int64]*entry)}
+}
+
+// SetLevelProvider configures runtime compression levels for this registry.
+func (r *Registry) SetLevelProvider(provider compresslevel.Provider) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.levelProvider = provider
+	r.mu.Unlock()
+}
+
+func (r *Registry) compressionLevels(ctx context.Context) compresslevel.Settings {
+	if r == nil {
+		return compresslevel.Default()
+	}
+	r.mu.RLock()
+	provider := r.levelProvider
+	r.mu.RUnlock()
+	return compresslevel.Resolve(ctx, provider)
 }
 
 // entry is the registry slot for one account. The map pointer is guarded by
@@ -149,6 +171,11 @@ func (e *entry) currentState() *state {
 }
 
 var defaultRegistry = NewRegistry()
+
+// ConfigureLevelProvider attaches runtime compression levels to the default registry.
+func ConfigureLevelProvider(provider compresslevel.Provider) {
+	defaultRegistry.SetLevelProvider(provider)
+}
 
 // SyncAccount mirrors one account's switch into the default registry.
 func SyncAccount(accountID int64, enabled bool, updatedAt time.Time) {

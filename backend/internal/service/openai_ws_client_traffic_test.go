@@ -290,9 +290,9 @@ func TestOpenAIWSClientTrafficHTTPBridgeMeasuresUpstreamTransport(t *testing.T) 
 		responseID := fmt.Sprintf("resp_bridge_%d", index+1)
 		var sse strings.Builder
 		for _, event := range wsTrafficCompletedTurn(t, responseID, strings.Repeat("b", 20*(index+1))) {
-			sse.WriteString("data: ")
-			sse.Write(event)
-			sse.WriteString("\n\n")
+			_, _ = sse.WriteString("data: ")
+			_, _ = sse.Write(event)
+			_, _ = sse.WriteString("\n\n")
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		n, _ := io.WriteString(w, sse.String())

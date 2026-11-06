@@ -157,13 +157,13 @@ func (c *openAIWSClientWireConn) Write(p []byte) (int, error) { return c.wire.Wr
 func (t *OpenAIWSClientTraffic) attach(conn net.Conn, rw *bufio.ReadWriter, compressed bool) (net.Conn, *bufio.ReadWriter, error) {
 	// A fresh hijack writer is empty; flush defensively so handshake bytes can
 	// never be counted as frames.
-	if err := rw.Writer.Flush(); err != nil {
+	if err := rw.Flush(); err != nil {
 		return conn, rw, err
 	}
 	wire := &openAIWSWireCounter{ReadWriteCloser: conn}
 	metered := &openAIWSClientWireConn{Conn: conn, wire: wire}
 	if n := rw.Reader.Buffered(); n > 0 {
-		buffered, _ := rw.Reader.Peek(n)
+		buffered, _ := rw.Peek(n)
 		metered.prefix = append([]byte(nil), buffered...)
 	}
 	// Accept runs before any reader or writer of this connection exists.

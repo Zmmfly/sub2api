@@ -51,7 +51,7 @@ func (u *wsTrafficUpstream) serve(w http.ResponseWriter, r *http.Request) {
 		u.t.Errorf("accept: %v", err)
 		return
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 	conn.SetReadLimit(openAIWSMessageReadLimitBytes)
 	u.mu.Lock()
 	u.conns++

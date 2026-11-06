@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -260,6 +261,70 @@ func TestLogOpenAIInstructionsRequiredDebug_NonTargetErrorSkipped(t *testing.T) 
 	)
 
 	require.False(t, logSink.ContainsMessage("OpenAI 上游返回 Instructions are required，已记录请求详情用于排查"))
+}
+
+func TestLogOpenAIGenericBadRequestDebug_LogsContentFreeRequestSummary(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logSink, restore := captureStructuredLog(t)
+	defer restore()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(nil))
+	c.Request.Header.Set("User-Agent", "codex_cli_rs/0.166.0")
+	c.Request.Header.Set(responsesLiteHeader, "true")
+	c.Request.Header.Set("Session_ID", "PRIVATE-SESSION-HEADER")
+
+	body := []byte(`{"model":"gpt-6.1-sol","stream":true,"store":false,"reasoning":{"effort":"high"},"service_tier":"priority","prompt_cache_key":"PRIVATE-CACHE-KEY","session_id":"PRIVATE-SESSION-ID","tools":[{"type":"function","name":"PRIVATE-TOOL-NAME","parameters":{"type":"object"}}],"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"PRIVATE-PROMPT"},{"type":"input_image","image_url":"data:image/png;base64,PRIVATE-IMAGE-ONE"}]},{"type":"function_call_output","call_id":"PRIVATE-CALL-ID","output":[{"type":"input_image","image_url":"data:image/png;base64,PRIVATE-IMAGE-TWO"}]},{"type":"item_reference","id":"PRIVATE-REFERENCE-ID"}]}`)
+	logOpenAIGenericBadRequestDebug(
+		context.Background(), c, &Account{ID: 12, Name: "C组-内部账号-3"},
+		http.StatusBadRequest, "Bad Request", body, []byte(`{"detail":"Bad Request"}`),
+	)
+
+	const message = "OpenAI 上游返回通用 Bad Request，已记录无正文请求摘要"
+	require.True(t, logSink.ContainsMessageAtLevel(message, "warn"))
+	for field, expected := range map[string]string{
+		"account_id":                  "12",
+		"request_model":               "gpt-6.1-sol",
+		"request_stream":              "true",
+		"request_body_size":           fmt.Sprint(len(body)),
+		"request_input_items":         "3",
+		"request_input_images":        "2",
+		"request_tool_call_outputs":   "1",
+		"request_item_references":     "1",
+		"request_tools":               "1",
+		"request_reasoning_effort":    "high",
+		"request_service_tier":        "priority",
+		"request_store":               "false",
+		"request_responses_lite":      "true",
+		"request_compact":             "false",
+		"codex_official_client_match": "true",
+	} {
+		require.True(t, logSink.ContainsFieldValue(field, expected), field)
+	}
+	for _, field := range []string{"request_body", "request_body_preview", "request_headers", "request_prompt_cache_key_sha256"} {
+		require.False(t, logSink.ContainsField(field), field)
+	}
+
+	// 详细错误仍走原有错误日志，通用摘要只匹配 detail-only 的 Codex 400。
+	logOpenAIGenericBadRequestDebug(
+		context.Background(), c, &Account{ID: 12},
+		http.StatusBadRequest, "Bad Request", body,
+		[]byte(`{"detail":"Bad Request","error":{"param":"input"}}`),
+	)
+	logOpenAIGenericBadRequestDebug(
+		context.Background(), c, &Account{ID: 12},
+		http.StatusForbidden, "Bad Request", body, []byte(`{"detail":"Bad Request"}`),
+	)
+
+	logSink.mu.Lock()
+	defer logSink.mu.Unlock()
+	require.Len(t, logSink.events, 1)
+	for _, event := range logSink.events {
+		for _, value := range event.Fields {
+			require.NotContains(t, fmt.Sprint(value), "PRIVATE-")
+		}
+	}
 }
 
 func TestIsOpenAITransientProcessingError(t *testing.T) {

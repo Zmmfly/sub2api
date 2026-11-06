@@ -19,6 +19,124 @@ import (
 	"go.uber.org/zap"
 )
 
+// openAIUpstreamRequestID preserves the provider correlation ID used for
+// upstream support tickets. The public OpenAI API uses x-request-id, while the
+// ChatGPT Codex Responses endpoint uses x-oai-request-id.
+func openAIUpstreamRequestID(headers http.Header) string {
+	return firstNonEmptyString(headers.Get("x-request-id"), headers.Get("x-oai-request-id"))
+}
+
+func isOpenAIGenericBadRequest(statusCode int, upstreamMsg string, upstreamBody []byte) bool {
+	if statusCode != http.StatusBadRequest || !strings.EqualFold(strings.TrimSpace(upstreamMsg), "Bad Request") || !gjson.ValidBytes(upstreamBody) {
+		return false
+	}
+	body := gjson.ParseBytes(upstreamBody)
+	if !body.IsObject() || len(body.Map()) != 1 {
+		return false
+	}
+	detail := body.Get("detail")
+	return detail.Type == gjson.String && strings.EqualFold(strings.TrimSpace(detail.String()), "Bad Request")
+}
+
+// logOpenAIGenericBadRequestDebug records only a content-free request shape.
+// ChatGPT Codex sometimes returns no code/param for a rejected Responses
+// payload, so body size and history shape are the only local clues available.
+func logOpenAIGenericBadRequestDebug(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	upstreamStatusCode int,
+	upstreamMsg string,
+	requestBody []byte,
+	upstreamBody []byte,
+) {
+	if !isOpenAIGenericBadRequest(upstreamStatusCode, upstreamMsg, upstreamBody) {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	accountID := int64(0)
+	accountName := ""
+	if account != nil {
+		accountID = account.ID
+		accountName = strings.TrimSpace(account.Name)
+	}
+	requestModel, requestStream, _ := extractOpenAIRequestMetaFromBody(requestBody)
+	fields := []zap.Field{
+		zap.String("component", "service.openai_gateway"),
+		zap.Int64("account_id", accountID),
+		zap.String("account_name", accountName),
+		zap.Int("upstream_status_code", upstreamStatusCode),
+		zap.String("upstream_error_message", strings.TrimSpace(upstreamMsg)),
+		zap.String("request_model", requestModel),
+		zap.Bool("request_stream", requestStream),
+		zap.Int("request_body_size", len(requestBody)),
+	}
+
+	inputItems := 0
+	inputImages := 0
+	toolCallOutputs := 0
+	itemReferences := 0
+	input := gjson.GetBytes(requestBody, "input")
+	if input.IsArray() {
+		inputItems = len(input.Array())
+	}
+	pending := []gjson.Result{input}
+	for len(pending) > 0 {
+		value := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if !value.IsObject() && !value.IsArray() {
+			continue
+		}
+		if value.IsObject() {
+			switch strings.TrimSpace(value.Get("type").String()) {
+			case "input_image":
+				inputImages++
+			case "function_call_output":
+				toolCallOutputs++
+			case "item_reference":
+				itemReferences++
+			}
+		}
+		value.ForEach(func(_, child gjson.Result) bool {
+			pending = append(pending, child)
+			return true
+		})
+	}
+	fields = append(fields,
+		zap.Int("request_input_items", inputItems),
+		zap.Int("request_input_images", inputImages),
+		zap.Int("request_tool_call_outputs", toolCallOutputs),
+		zap.Int("request_item_references", itemReferences),
+		zap.Int("request_tools", len(gjson.GetBytes(requestBody, "tools").Array())),
+	)
+	if effort := strings.TrimSpace(gjson.GetBytes(requestBody, "reasoning.effort").String()); effort != "" {
+		fields = append(fields, zap.String("request_reasoning_effort", effort))
+	}
+	if tier := strings.TrimSpace(gjson.GetBytes(requestBody, "service_tier").String()); tier != "" {
+		fields = append(fields, zap.String("request_service_tier", tier))
+	}
+	if store := gjson.GetBytes(requestBody, "store"); store.Type == gjson.True || store.Type == gjson.False {
+		fields = append(fields, zap.Bool("request_store", store.Bool()))
+	}
+	if c != nil {
+		userAgent := ""
+		originator := ""
+		if c.Request != nil {
+			userAgent = strings.TrimSpace(c.GetHeader("User-Agent"))
+			originator = strings.TrimSpace(c.GetHeader("originator"))
+		}
+		fields = append(fields,
+			zap.String("request_user_agent", userAgent),
+			zap.Bool("codex_official_client_match", openai.IsCodexOfficialClientByHeaders(userAgent, originator)),
+			zap.Bool("request_responses_lite", isOpenAIResponsesLiteHeader(c.GetHeader(responsesLiteHeader))),
+			zap.Bool("request_compact", isOpenAIResponsesCompactPath(c)),
+		)
+	}
+	logger.FromContext(ctx).With(fields...).Warn("OpenAI 上游返回通用 Bad Request，已记录无正文请求摘要")
+}
+
 func logOpenAIInstructionsRequiredDebug(
 	ctx context.Context,
 	c *gin.Context,
@@ -636,6 +754,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 	}
 	setOpsUpstreamError(c, resp.StatusCode, upstreamMsg, upstreamDetail)
 	logOpenAIInstructionsRequiredDebug(ctx, c, account, resp.StatusCode, upstreamMsg, requestBody, body)
+	logOpenAIGenericBadRequestDebug(ctx, c, account, resp.StatusCode, upstreamMsg, requestBody, body)
 
 	if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
 		logger.LegacyPrintf("service.openai_gateway",
@@ -656,7 +775,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 			AccountID:          account.ID,
 			AccountName:        account.Name,
 			UpstreamStatusCode: resp.StatusCode,
-			UpstreamRequestID:  resp.Header.Get("x-request-id"),
+			UpstreamRequestID:  openAIUpstreamRequestID(resp.Header),
 			Kind:               "failover",
 			Message:            upstreamMsg,
 			Detail:             upstreamDetail,
@@ -705,7 +824,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 			AccountID:          account.ID,
 			AccountName:        account.Name,
 			UpstreamStatusCode: resp.StatusCode,
-			UpstreamRequestID:  resp.Header.Get("x-request-id"),
+			UpstreamRequestID:  openAIUpstreamRequestID(resp.Header),
 			Kind:               "http_error",
 			Message:            upstreamMsg,
 			Detail:             upstreamDetail,
@@ -744,7 +863,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		AccountID:          account.ID,
 		AccountName:        account.Name,
 		UpstreamStatusCode: resp.StatusCode,
-		UpstreamRequestID:  resp.Header.Get("x-request-id"),
+		UpstreamRequestID:  openAIUpstreamRequestID(resp.Header),
 		Kind:               kind,
 		Message:            upstreamMsg,
 		Detail:             upstreamDetail,
@@ -911,7 +1030,7 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 			AccountID:          account.ID,
 			AccountName:        account.Name,
 			UpstreamStatusCode: resp.StatusCode,
-			UpstreamRequestID:  resp.Header.Get("x-request-id"),
+			UpstreamRequestID:  openAIUpstreamRequestID(resp.Header),
 			Kind:               "http_error",
 			Message:            upstreamMsg,
 			Detail:             upstreamDetail,
@@ -943,7 +1062,7 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 		AccountID:          account.ID,
 		AccountName:        account.Name,
 		UpstreamStatusCode: resp.StatusCode,
-		UpstreamRequestID:  resp.Header.Get("x-request-id"),
+		UpstreamRequestID:  openAIUpstreamRequestID(resp.Header),
 		Kind:               kind,
 		Message:            upstreamMsg,
 		Detail:             upstreamDetail,

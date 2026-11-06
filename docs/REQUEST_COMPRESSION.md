@@ -8,9 +8,15 @@
 
 只有明确指向请求 Content-Encoding 不兼容的诊断才会退役已确认的编码，并尝试其它编码。裸 HTTP 415 可能是 Content-Type 不兼容，不能单独推翻已确认的编码。错误 JSON 中回显的输入、图片解压错误和上游响应解压错误也不能作为请求编码被拒绝的证据。
 
-首次探测时，普通业务错误、403、限流和上游 5xx 不会消耗候选编码或触发连续重试。未确认编码收到特定的 400/422 `Failed to read request body` 时，可以继续尝试其它编码；如果所有这类尝试都失败，只有未压缩重试成功才会固定为非压缩。首次探测的裸 415 也遵循这个限制：未压缩请求同样失败时，不会把所有编码判成不支持。明确拒绝所有候选编码的上游仍会使用非压缩请求。
+首次探测时，普通业务错误、403、限流和上游 5xx 不会消耗候选编码或触发连续重试。未确认编码收到特定的 400/422 `Failed to read request body`，或 ChatGPT Codex 严格只有 `{"detail":"Bad Request"}` 的模糊 400 时，可以继续尝试其它编码；如果所有这类尝试都失败，只有未压缩重试成功才会暂时固定为非压缩。首次探测的裸 415 也遵循这个限制：未压缩请求同样失败时，不会把所有编码判成不支持。明确拒绝所有候选编码的上游仍会使用非压缩请求。
 
-覆盖：`TestExecutePreservesSettledCodingOnOrdinaryHTTPFailures`、`TestExecutePreservesSettledCodingOnTransportFailure`、`TestExecuteInitialHealthFailuresDoNotMultiplyTrafficOrPinIdentity`、`TestExecuteInitialBodyReadFailureOnlyPinsIdentityAfterSuccessfulPlainAttempt`、`TestUpstreamRequestCompressionPreservesVerifiedCodingAcrossHTTPFailures`。
+上述两种模糊 400 只允许首次协商继续探测；已确认编码后再次出现相同响应，仍按普通 HTTP 错误处理，不做未压缩重放。带其它字段的 400 或普通业务 400 不享受这个例外。
+
+模糊失败后明文成功只固定 **30 分钟**，到期自动重新探测剩余候选，避免偶发成功把账号永久降级为明文。明确拒绝所有候选编码后固定明文不受这个 TTL 影响，因为它代表已经确认的能力结论。
+
+这种限时明文结果以 `identity` 值写入同一个 Redis algorithm 键，TTL 固定为 30 分钟，读取和请求不会续期。各实例通过原子读取值与 PTTL 对齐同一个截止时间；后启动的实例只继承剩余时间。重复发布不会延长已有 identity，另一实例已确认的压缩结果也不会被迟到的 identity 覆盖。到期后重新协商成功会用普通压缩结果及 6 小时滑动 TTL 覆盖它。明确拒绝产生的永久明文不写 Redis。
+
+覆盖：`TestExecutePreservesSettledCodingOnOrdinaryHTTPFailures`、`TestExecutePreservesSettledCodingOnTransportFailure`、`TestExecuteInitialHealthFailuresDoNotMultiplyTrafficOrPinIdentity`、`TestExecuteInitialBodyReadFailureOnlyPinsIdentityAfterSuccessfulPlainAttempt`、`TestExecuteProbesIdentityAfterInitialGenericCodexBadRequest`、`TestExecuteBodyReadIdentityRetriesAfterTTL`、`TestPersistSharedIdentityScriptPreservesCodingAndDeadline`、`TestRegistrySharesAmbiguousIdentityAcrossInstancesUntilTTL`、`TestUpstreamRequestCompressionGenericCodex400FallsBackToIdentity`、`TestUpstreamRequestCompressionPreservesVerifiedCodingAcrossHTTPFailures`。
 
 ## Redis：6 小时滑动过期
 

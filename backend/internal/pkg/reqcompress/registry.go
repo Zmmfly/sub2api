@@ -10,8 +10,9 @@
 //
 // The administrator's on/off switch is persisted in the account database row.
 // When Redis is configured, successful codings are shared with a six-hour
-// sliding TTL refreshed by each account request. Local memory retains the
-// verified coding even if Redis is unavailable; identity is not shared.
+// sliding TTL refreshed by each account request. Ambiguous-identity downgrades
+// share a fixed 30-minute TTL; explicit identity-only results remain local.
+// Local memory retains either result if Redis is unavailable.
 package reqcompress
 
 import (
@@ -32,6 +33,7 @@ type Registry struct {
 	shared        *redis.Client
 	sharedRefresh *redis.Client // shares the pool, with short renewal socket deadlines
 	levelProvider compresslevel.Provider
+	nowFunc       func() time.Time
 }
 
 // NewRegistry returns an empty registry.
@@ -57,6 +59,13 @@ func (r *Registry) compressionLevels(ctx context.Context) compresslevel.Settings
 	provider := r.levelProvider
 	r.mu.RUnlock()
 	return compresslevel.Resolve(ctx, provider)
+}
+
+func (r *Registry) now() time.Time {
+	if r != nil && r.nowFunc != nil {
+		return r.nowFunc()
+	}
+	return time.Now()
 }
 
 // entry is the registry slot for one account. The map pointer is guarded by

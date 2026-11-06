@@ -37,19 +37,22 @@ var rejectionKeywords = []string{
 	"invalid_encoding",
 }
 
-// Only this specific 400/422 diagnostic can guide an unverified trial without
-// explicit coding evidence. Business errors and upstream outages never justify
-// multiplying uploads or discarding a coding candidate.
-func shouldProbeAfterBodyReadFailure(resp *http.Response, kind string) bool {
-	return resp != nil && kind == responseFailureBodyRead &&
-		(resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity)
+// Only specific ambiguous 400/422 diagnostics can guide an unverified trial
+// without explicit coding evidence. Business errors and upstream outages never
+// justify multiplying uploads or discarding a coding candidate.
+func shouldProbeAfterAmbiguousRequestFailure(resp *http.Response, kind string) bool {
+	if resp == nil || (resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusUnprocessableEntity) {
+		return false
+	}
+	return kind == responseFailureBodyRead || kind == responseFailureGenericBadRequest
 }
 
 const (
-	responseFailureHTTP          = "http_error"
-	responseFailureContentCoding = "content_coding_rejected"
-	responseFailureMediaType     = "unsupported_media_type"
-	responseFailureBodyRead      = "request_body_read"
+	responseFailureHTTP              = "http_error"
+	responseFailureContentCoding     = "content_coding_rejected"
+	responseFailureMediaType         = "unsupported_media_type"
+	responseFailureBodyRead          = "request_body_read"
+	responseFailureGenericBadRequest = "generic_bad_request"
 )
 
 // inspectEncodingResponse classifies a bounded diagnostic without changing the
@@ -87,7 +90,26 @@ func inspectEncodingResponse(resp *http.Response) string {
 	if strings.Contains(strings.ToLower(message), "failed to read request body") {
 		return responseFailureBodyRead
 	}
+	if resp.StatusCode == http.StatusBadRequest && isGenericCodexBadRequest(body) {
+		return responseFailureGenericBadRequest
+	}
 	return kind
+}
+
+// ChatGPT Codex can reject a content-coded request with no field-level
+// diagnostic. Restrict the extra initial probes to this exact detail-only
+// envelope so ordinary invalid requests still return after their first attempt.
+func isGenericCodexBadRequest(body []byte) bool {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(body, &envelope) != nil || len(envelope) != 1 {
+		return false
+	}
+	raw, ok := envelope["detail"]
+	if !ok {
+		return false
+	}
+	var detail string
+	return json.Unmarshal(raw, &detail) == nil && strings.EqualFold(strings.TrimSpace(detail), "Bad Request")
 }
 
 // Only inspect an error's message, not an echoed payload or unrelated JSON

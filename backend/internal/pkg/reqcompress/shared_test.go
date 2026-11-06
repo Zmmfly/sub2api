@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -222,7 +223,7 @@ func TestRegistryDisableDeletesSharedAlgorithm(t *testing.T) {
 	require.Equal(t, AlgorithmNone, registry.SettledAlgorithm(context.Background(), accountID))
 }
 
-func TestRegistryDoesNotPersistIdentity(t *testing.T) {
+func TestRegistryDoesNotPersistExplicitlyRejectedIdentity(t *testing.T) {
 	server, client := sharedTestRedis(t)
 	registry := sharedTestRegistry(client)
 	const accountID int64 = 704
@@ -240,6 +241,93 @@ func TestRegistryDoesNotPersistIdentity(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"br", "zstd", "deflate", ""}, sent)
 	require.False(t, server.Exists(sharedAlgorithmKey(accountID)))
+}
+
+func TestPersistSharedIdentityScriptPreservesCodingAndDeadline(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	const accountID int64 = 712
+	key := sharedAlgorithmKey(accountID)
+	run := func() {
+		t.Helper()
+		require.NoError(t, persistSharedIdentityScript.Run(context.Background(), client,
+			[]string{key, sharedInvalidationKey(accountID)}, ambiguousIdentityRetryTTL.Milliseconds()).Err())
+	}
+
+	run()
+	requireSharedAlgorithm(t, server, accountID, Algorithm(sharedIdentityValue))
+	require.Equal(t, ambiguousIdentityRetryTTL, server.TTL(key))
+
+	// Republishing the same identity does not turn its fixed TTL into a sliding
+	// expiration, even when the caller supplies a fresh 30-minute PX value.
+	server.FastForward(10 * time.Minute)
+	run()
+	require.Equal(t, 20*time.Minute, server.TTL(key))
+
+	// A coding negotiated by another instance always wins over late identity.
+	require.NoError(t, server.Set(key, string(AlgorithmBrotli)))
+	server.SetTTL(key, sharedAlgorithmTTL)
+	run()
+	requireSharedAlgorithm(t, server, accountID, AlgorithmBrotli)
+	require.Equal(t, sharedAlgorithmTTL, server.TTL(key))
+}
+
+func TestRegistrySharesAmbiguousIdentityAcrossInstancesUntilTTL(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	first := sharedTestRegistry(client)
+	second := sharedTestRegistry(client)
+	now := time.Date(2026, 11, 6, 22, 0, 0, 0, time.UTC)
+	first.nowFunc = func() time.Time { return now }
+	second.nowFunc = func() time.Time { return now }
+	const accountID int64 = 711
+	first.Sync(accountID, true, time.Time{})
+	second.Sync(accountID, true, time.Time{})
+
+	var firstAttempts []string
+	resp, err := first.Execute(accountID, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+		encoding := req.Header.Get("Content-Encoding")
+		firstAttempts = append(firstAttempts, encoding)
+		if encoding == "" {
+			return okResponse("identity"), nil
+		}
+		return &http.Response{StatusCode: 400, Body: io.NopCloser(strings.NewReader(`{"detail":"Bad Request"}`))}, nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, []string{"br", "zstd", "deflate", ""}, firstAttempts)
+	requireSharedAlgorithm(t, server, accountID, Algorithm(sharedIdentityValue))
+	require.Equal(t, ambiguousIdentityRetryTTL, server.TTL(sharedAlgorithmKey(accountID)))
+	require.Equal(t, AlgorithmNone, second.SettledAlgorithm(context.Background(), accountID))
+
+	// The second instance first reads the shared identity at minute 29. It must
+	// inherit only the remaining minute, not start a fresh 30-minute timer.
+	now = now.Add(29 * time.Minute)
+	server.FastForward(29 * time.Minute)
+	var secondAttempts []string
+	resp, err = second.Execute(accountID, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+		secondAttempts = append(secondAttempts, req.Header.Get("Content-Encoding"))
+		require.Empty(t, req.Header.Get("Content-Encoding"))
+		return okResponse("identity"), nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, []string{""}, secondAttempts)
+	require.Equal(t, time.Minute, server.TTL(sharedAlgorithmKey(accountID)), "identity reads never renew its TTL")
+
+	// At the shared expiry the second instance reopens candidates. Its success
+	// replaces identity with the ordinary six-hour coding result.
+	now = now.Add(time.Minute)
+	server.FastForward(time.Minute)
+	secondAttempts = nil
+	resp, err = second.Execute(accountID, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+		secondAttempts = append(secondAttempts, req.Header.Get("Content-Encoding"))
+		require.Equal(t, "br", req.Header.Get("Content-Encoding"))
+		return okResponse("brotli-recovered"), nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, []string{"br"}, secondAttempts)
+	requireSharedAlgorithm(t, server, accountID, AlgorithmBrotli)
+	require.Equal(t, sharedAlgorithmTTL, server.TTL(sharedAlgorithmKey(accountID)))
 }
 
 func TestRegistryDoesNotPersistAlgorithmAfterReset(t *testing.T) {

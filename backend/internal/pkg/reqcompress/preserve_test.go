@@ -28,6 +28,7 @@ func TestExecutePreservesSettledCodingOnOrdinaryHTTPFailures(t *testing.T) {
 	}{
 		{400, `{"error":{"message":"Failed to read request body","type":"invalid_request_error"}}`, responseFailureBodyRead},
 		{400, `{"error":{"message":"Failed to decode JSON request body"}}`, responseFailureHTTP},
+		{400, `{"detail":"Bad Request"}`, responseFailureGenericBadRequest},
 		{400, `{"input":"unsupported brotli","error":{"message":"invalid model"}}`, responseFailureHTTP},
 		{400, `{"error":{"message":"failed to decompress image attachment"}}`, responseFailureHTTP},
 		{500, `<html>failed to decompress request body in an unrelated diagnostic</html>`, responseFailureHTTP},
@@ -273,6 +274,47 @@ func TestExecuteInitialBodyReadFailureOnlyPinsIdentityAfterSuccessfulPlainAttemp
 			require.NoError(t, resp.Body.Close())
 		})
 	}
+}
+
+func TestExecuteBodyReadIdentityRetriesAfterTTL(t *testing.T) {
+	registry := NewRegistry()
+	now := time.Date(2026, 11, 6, 22, 0, 0, 0, time.UTC)
+	registry.nowFunc = func() time.Time { return now }
+	registry.Sync(817, true, time.Time{})
+	brotliRecovered := false
+	var attempts []string
+	send := func(req *http.Request) (*http.Response, error) {
+		coding := req.Header.Get("Content-Encoding")
+		attempts = append(attempts, coding)
+		if coding == "" {
+			return okResponse("identity"), nil
+		}
+		if brotliRecovered && Algorithm(coding) == AlgorithmBrotli {
+			return okResponse("brotli-recovered"), nil
+		}
+		return &http.Response{StatusCode: 400, Body: io.NopCloser(strings.NewReader(`{"error":{"message":"Failed to read request body"}}`))}, nil
+	}
+
+	resp, err := registry.Execute(817, newTestRequest(t, testBody()), send)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, []string{"br", "zstd", "deflate", ""}, attempts)
+
+	now = now.Add(ambiguousIdentityRetryTTL - time.Second)
+	attempts = nil
+	resp, err = registry.Execute(817, newTestRequest(t, testBody()), send)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, []string{""}, attempts)
+
+	now = now.Add(time.Second)
+	brotliRecovered = true
+	attempts = nil
+	resp, err = registry.Execute(817, newTestRequest(t, testBody()), send)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, []string{"br"}, attempts)
+	require.Equal(t, AlgorithmBrotli, registry.SettledAlgorithm(context.Background(), 817))
 }
 
 func TestExecuteInitialMediaTypeFailureDoesNotPoisonNegotiation(t *testing.T) {

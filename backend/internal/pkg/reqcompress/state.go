@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+const ambiguousIdentityRetryTTL = 30 * time.Minute
+
 // state holds the process-local negotiation cache for one opted-in account.
 // A zero-value state has not been negotiated yet and starts with TrialOrder.
 type state struct {
@@ -25,6 +27,10 @@ type state struct {
 	// sharedLoaded records that initial shared-state loading has completed or
 	// that a fresher local transition has made a reload unnecessary.
 	sharedLoaded bool
+	// identityRetryAt bounds a downgrade caused by ambiguous upstream failures.
+	// A zero value means identity was pinned by explicit coding rejections and
+	// does not expire on a timer.
+	identityRetryAt time.Time
 	// lastFailureLog rate-limits warning-level preservation logs so a persistent
 	// upstream outage cannot flood the log while Debug still records each event.
 	lastFailureLog time.Time
@@ -36,15 +42,22 @@ func newState() *state {
 
 // begin returns the codings this request should try, in order, and whether the
 // caller owns negotiation bookkeeping for them.
-func (s *state) begin() ([]Algorithm, bool) {
+func (s *state) begin(now time.Time) ([]Algorithm, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.tested {
-		if s.current == AlgorithmNone {
+		if s.current != AlgorithmNone {
+			return []Algorithm{s.current}, false
+		}
+		if s.identityRetryAt.IsZero() || now.Before(s.identityRetryAt) || len(s.remaining) == 0 {
 			return nil, false
 		}
-		return []Algorithm{s.current}, false
+		// Ambiguous failures only pinned identity temporarily. Re-open the
+		// remaining candidates at the TTL boundary; a successful coding will
+		// settle again through the ordinary negotiation path.
+		s.tested = false
+		s.identityRetryAt = time.Time{}
 	}
 	if s.negotiating {
 		return nil, false
@@ -67,6 +80,7 @@ func (s *state) negotiationSucceeded(algorithm Algorithm) {
 	s.tested = true
 	s.negotiating = false
 	s.sharedLoaded = true
+	s.identityRetryAt = time.Time{}
 	s.remaining = keepFrom(s.remaining, algorithm)
 }
 
@@ -107,21 +121,35 @@ func (s *state) abortNegotiation() {
 	s.negotiating = false
 }
 
-// pinIdentity finishes an exhausted initial negotiation and reports whether it
-// changed the state. Ordinary failures of a settled coding must not call it.
-func (s *state) pinIdentity() bool {
+// pinIdentity finishes an exhausted initial negotiation after every coding
+// was explicitly rejected. This capability conclusion does not expire on a timer.
+func (s *state) pinIdentity() {
+	s.pinIdentityUntil(time.Time{})
+}
+
+// pinIdentityUntil pins identity after ambiguous upstream failures. The
+// remaining candidates stay intact and become eligible again at retryAt.
+func (s *state) pinIdentityUntil(retryAt time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.tested && s.current == AlgorithmNone && len(s.remaining) == 0 {
-		return false
-	}
 	s.current = AlgorithmNone
 	s.tested = true
 	s.negotiating = false
 	s.sharedLoaded = true
-	s.remaining = nil
-	return true
+	s.identityRetryAt = retryAt
+	if retryAt.IsZero() {
+		s.remaining = nil
+	}
+}
+
+func (s *state) identityRetry() (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.tested || s.current != AlgorithmNone || s.identityRetryAt.IsZero() {
+		return time.Time{}, false
+	}
+	return s.identityRetryAt, true
 }
 
 // retireSettled handles an upstream that stopped accepting the settled coding.

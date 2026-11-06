@@ -156,6 +156,8 @@ func TestExecuteNegotiatesInPreferenceOrder(t *testing.T) {
 func TestExecuteFallsBackToIdentityWhenEveryCodingIsRejected(t *testing.T) {
 	body := testBody()
 	registry := NewRegistry()
+	now := time.Date(2026, 11, 6, 22, 0, 0, 0, time.UTC)
+	registry.nowFunc = func() time.Time { return now }
 	registry.Sync(2, true, time.Time{})
 
 	var sent []string
@@ -175,7 +177,9 @@ func TestExecuteFallsBackToIdentityWhenEveryCodingIsRejected(t *testing.T) {
 	require.Equal(t, "identity", readAll(t, resp.Body))
 	require.Equal(t, []string{"br", "zstd", "deflate", ""}, sent)
 
-	// Identity is pinned for the process lifetime after exhausting the trial.
+	// Explicit coding rejections are a capability conclusion, not an ambiguous
+	// failure, so the 30-minute ambiguous-identity TTL does not revive them.
+	now = now.Add(24 * time.Hour)
 	sent = nil
 	resp, err = registry.Execute(2, newTestRequest(t, body), send)
 	require.NoError(t, err)
@@ -253,6 +257,57 @@ func TestExecuteProbesRemainingCodingsOnInitialBodyReadFailure(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, []string{"zstd"}, sent)
+}
+
+func TestExecuteProbesIdentityAfterInitialGenericCodexBadRequest(t *testing.T) {
+	body := testBody()
+	registry := NewRegistry()
+	now := time.Date(2026, 11, 6, 22, 0, 0, 0, time.UTC)
+	registry.nowFunc = func() time.Time { return now }
+	registry.Sync(130, true, time.Time{})
+	brotliRecovered := false
+
+	var sent []string
+	send := func(req *http.Request) (*http.Response, error) {
+		encoding := req.Header.Get("Content-Encoding")
+		sent = append(sent, encoding)
+		if encoding == "" {
+			require.Equal(t, string(body), readAll(t, req.Body))
+			return okResponse("identity"), nil
+		}
+		if brotliRecovered && Algorithm(encoding) == AlgorithmBrotli {
+			return okResponse("brotli-recovered"), nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Body:       io.NopCloser(strings.NewReader(`{"detail":"Bad Request"}`)),
+		}, nil
+	}
+	resp, err := registry.Execute(130, newTestRequest(t, body), send)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "identity", readAll(t, resp.Body))
+	require.Equal(t, []string{"br", "zstd", "deflate", ""}, sent)
+
+	// Identity is reused within the 30-minute TTL instead of multiplying
+	// uploads merely because no compression badge is shown.
+	now = now.Add(ambiguousIdentityRetryTTL - time.Second)
+	sent = nil
+	resp, err = registry.Execute(130, newTestRequest(t, body), send)
+	require.NoError(t, err)
+	require.Equal(t, "identity", readAll(t, resp.Body))
+	require.Equal(t, []string{""}, sent)
+
+	// At the TTL boundary the candidates are retried. A recovered coding
+	// settles normally and subsequent requests no longer pin identity.
+	now = now.Add(time.Second)
+	brotliRecovered = true
+	sent = nil
+	resp, err = registry.Execute(130, newTestRequest(t, body), send)
+	require.NoError(t, err)
+	require.Equal(t, "brotli-recovered", readAll(t, resp.Body))
+	require.Equal(t, []string{"br"}, sent)
+	require.Equal(t, AlgorithmBrotli, registry.SettledAlgorithm(context.Background(), 130))
 }
 
 func TestExecuteKeepsTrialOnOrdinaryBusinessFailure(t *testing.T) {

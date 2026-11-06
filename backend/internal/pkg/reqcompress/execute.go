@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/traffic"
 )
@@ -59,7 +60,7 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 		return send(req)
 	}
 
-	work, ownsNegotiation := negotiation.begin()
+	work, ownsNegotiation := negotiation.begin(r.now())
 	if len(work) == 0 {
 		return send(req)
 	}
@@ -145,7 +146,7 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 				logPreservedCoding(req, accountID, algorithm, negotiation, resp, failureKind, nil)
 				return resp, nil
 			}
-			if !shouldProbeAfterBodyReadFailure(resp, failureKind) {
+			if !shouldProbeAfterAmbiguousRequestFailure(resp, failureKind) {
 				// A business/auth/rate/health error also proves nothing during
 				// the initial trial. Do not upload the body four times or pin
 				// identity just because the provider is temporarily unhealthy.
@@ -192,13 +193,20 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 	identityResp, identityErr := send(req)
 	if ownsNegotiation {
 		if !unverifiedCandidates || (identityErr == nil && encodingAccepted(identityResp)) {
-			negotiation.pinIdentity()
 			reason := "all_codings_rejected"
 			if unverifiedCandidates {
 				reason = "initial_identity_accepted"
+				retryAt := r.now().Add(ambiguousIdentityRetryTTL)
+				negotiation.pinIdentityUntil(retryAt)
+				r.persistSharedIdentity(req.Context(), accountID, negotiation, retryAt)
+			} else {
+				negotiation.pinIdentity()
 			}
 			fields := append(requestLogFields(req, accountID, AlgorithmNone, identityResp),
 				"reason", reason, "last_status", lastStatus)
+			if unverifiedCandidates {
+				fields = append(fields, "identity_ttl_seconds", int(ambiguousIdentityRetryTTL/time.Second))
+			}
 			slog.Warn("reqcompress no coding accepted", fields...)
 			slog.Warn("reqcompress pinned identity", fields...)
 		} else {

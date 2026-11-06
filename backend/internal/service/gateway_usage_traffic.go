@@ -9,8 +9,8 @@ import (
 )
 
 // writeUsageLogBestEffort defers only persistence until the HTTP entity-body
-// counters are final. Billing and the usage worker's reservation/drop policy
-// retain their existing timing. In particular, waiting for Finalize here would
+// or WebSocket turn counters are final. Billing and the usage worker's
+// reservation/drop policy retain their existing timing. Waiting for Finalize here would
 // deadlock the no-worker/overflow synchronous fallback inside the handler.
 func writeUsageLogBestEffort(ctx context.Context, repo UsageLogRepository, usageLog *UsageLog, logKey string) {
 	if repo == nil || usageLog == nil {
@@ -19,7 +19,7 @@ func writeUsageLogBestEffort(ctx context.Context, repo UsageLogRepository, usage
 	collector := traffic.FromContext(ctx)
 	if collector == nil {
 		// Direct service/background calls retain their old path. WS records
-		// without an HTTP collector cannot carry HTTP entity-body traffic.
+		// without a turn or request collector have no traffic measurement.
 		if usageLog.OpenAIWSMode || usageLog.RequestType == RequestTypeWSV2 || usageLog.RequestType == RequestTypeLive {
 			if usageLog.Traffic != nil {
 				copy := *usageLog
@@ -44,11 +44,11 @@ func writeUsageLogBestEffort(ctx context.Context, repo UsageLogRepository, usage
 				logger.LegacyPrintf(logKey, "Create usage log after traffic finalize panicked: %v", recovered)
 			}
 		}()
-		if measured != nil && (frozen.OpenAIWSMode || frozen.RequestType == RequestTypeWSV2) {
-			// OpenAIWSMode also describes HTTP ingress forwarded over upstream
-			// WS. Keep the real downstream HTTP body, not upstream WS messages.
-			measured.Upstream = nil
-		}
+		// HTTP ingress forwarded over an upstream WebSocket (OpenAIWSMode)
+		// carries the leased turns' measured upstream messages. A client
+		// WebSocket turn's collector carries that turn's upstream and
+		// downstream; the hijacked handshake collector finalizes without a
+		// snapshot, so measured is nil there.
 		frozen.Traffic = measured
 		writeUsageLogBestEffortNow(ctx, repo, frozen, logKey)
 	}

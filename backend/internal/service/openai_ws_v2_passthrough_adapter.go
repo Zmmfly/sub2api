@@ -29,6 +29,25 @@ type openAIWSClientFrameConn struct {
 	// model identifier they supplied for the current turn.
 	restoreResponseModel func([]byte) []byte
 	restoreToolNames     func([]byte) []byte
+	// traffic meters the client connection; nil leaves it unmeasured.
+	traffic *OpenAIWSClientTraffic
+}
+
+// openAIWSTurnTrafficFrameConn marks the active turn's upstream attribution
+// when a read fails, as the pooled lease does for its reader.
+type openAIWSTurnTrafficFrameConn struct {
+	openaiwsv2.FrameConn
+	tracker *atomic.Pointer[openAIWSTurnTraffic]
+}
+
+func (c *openAIWSTurnTrafficFrameConn) ReadFrame(ctx context.Context) (coderws.MessageType, []byte, error) {
+	msgType, payload, err := c.FrameConn.ReadFrame(ctx)
+	if err != nil {
+		if tracker := c.tracker.Load(); tracker != nil {
+			tracker.readFailed.Store(true)
+		}
+	}
+	return msgType, payload, err
 }
 
 // openAIWSPolicyEnforcingFrameConn wraps a client-side FrameConn and runs
@@ -604,7 +623,7 @@ func (c *openAIWSClientFrameConn) ReadFrame(ctx context.Context) (coderws.Messag
 	if c.controlCtx != nil {
 		controlCtx = c.controlCtx
 	}
-	msgType, payload, err := readOpenAIWSClientMessageWithTimeoutStart(
+	msgType, payload, err := readOpenAIWSClientMessageMetered(
 		controlCtx,
 		c.conn,
 		c.interTurnIdleTimeout,
@@ -612,6 +631,7 @@ func (c *openAIWSClientFrameConn) ReadFrame(ctx context.Context) (coderws.Messag
 		"websocket idle timeout",
 		c.interTurnStarted,
 		func() bool { return c.waitingForNextTurn.Load() },
+		c.traffic,
 	)
 	return msgType, payload, err
 }
@@ -651,7 +671,7 @@ func (c *openAIWSClientFrameConn) WriteFrame(ctx context.Context, msgType coderw
 			payload = c.restoreToolNames(payload)
 		}
 	}
-	return c.conn.Write(ctx, msgType, payload)
+	return c.traffic.WriteClientMessage(ctx, c.conn, msgType, payload)
 }
 
 func (c *openAIWSClientFrameConn) Close() error {
@@ -688,6 +708,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if err := validateOpenAIWSBearerToken(account, token); err != nil {
 		return err
 	}
+	clientTraffic := OpenAIWSClientTrafficFromContext(ctx)
 	if isOpenAIResponsesLiteWebSocketPayload(firstClientMessage) {
 		liteFirstMessage, _, liteErr := normalizeOpenAIResponsesLitePayloadForAccount(firstClientMessage, account)
 		if liteErr != nil {
@@ -785,7 +806,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		eventBytes := buildOpenAIFastPolicyBlockedWSEvent(blocked)
 		if eventBytes != nil {
 			writeCtx, cancelWrite := context.WithTimeout(ctx, s.openAIWSWriteTimeout())
-			_ = clientConn.Write(writeCtx, coderws.MessageText, eventBytes)
+			_ = clientTraffic.WriteClientMessage(writeCtx, clientConn, coderws.MessageText, eventBytes)
 			cancelWrite()
 		}
 		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, blocked.Message, blocked)
@@ -921,8 +942,12 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if !ok {
 		return errors.New("openai ws passthrough upstream connection does not support frame relay")
 	}
+	// The session's upstream socket outlives turns; each turn records its own
+	// part of it. The first frame belongs to the turn the caller started.
+	var upstreamTurnTraffic atomic.Pointer[openAIWSTurnTraffic]
+	upstreamTurnTraffic.Store(clientTraffic.beginUpstreamTurnTraffic(upstreamConn))
 	relayUpstreamFrameConn := &openAIWSPassthroughFirstOutputFrameConn{
-		inner:             upstreamFrameConn,
+		inner:             &openAIWSTurnTrafficFrameConn{FrameConn: upstreamFrameConn, tracker: &upstreamTurnTraffic},
 		activeReadTimeout: s.openAIWSPassthroughIdleTimeout(),
 		deadlineChanged:   make(chan struct{}, 1),
 		resolveDeadline: func(payload []byte) openAIWSPassthroughFirstOutputDeadline {
@@ -969,6 +994,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		restoreToolNames: func(payload []byte) []byte {
 			return restoreCodexToolNamesFromContext(c, payload)
 		},
+		traffic: clientTraffic,
 	}
 	policyClientConn := &openAIWSPolicyEnforcingFrameConn{
 		inner: clientFrameConn,
@@ -990,6 +1016,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					err := errors.New("overlapping response.create is not supported")
 					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, err.Error(), err)
 				}
+				// Start before any check can reject the request or relay it upstream.
+				clientTraffic.BeginTurn()
+				upstreamTurnTraffic.Store(clientTraffic.beginUpstreamTurnTraffic(upstreamConn))
 				defer func() {
 					if !acceptedTurn {
 						turnLifecycle.cancelResponseCreate()
@@ -1130,7 +1159,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				return
 			}
 			writeCtx, cancel := context.WithTimeout(ctx, s.openAIWSWriteTimeout())
-			_ = clientConn.Write(writeCtx, coderws.MessageText, eventBytes)
+			_ = clientTraffic.WriteClientMessage(writeCtx, clientConn, coderws.MessageText, eventBytes)
 			cancel()
 		},
 	}
@@ -1257,6 +1286,8 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					markOpenAIWSClientVisibleFailure(c, eventType, payload)
 				}
 				if msgType == coderws.MessageText && openAIWSPassthroughIsTerminalOutput(payload) {
+					// End after the terminal write, before admitting the next turn.
+					clientTraffic.EndTurn()
 					turnLifecycle.finishTerminalWrite(writeErr == nil, clientFrameConn.markTurnCompleted)
 				}
 			},

@@ -60,8 +60,10 @@ export interface OpsTrafficIngestionHealth {
 
 export interface OpsTrafficSummary {
   source: 'http_requests'
-  // Each persisted HTTP request contributes two possible body measurements per
-  // side, independent of usage/error logging (including failed requests).
+  // Each persisted request (an HTTP request or a client WebSocket turn)
+  // contributes two possible body measurements per side, independent of
+  // usage/error logging (including failed requests). The value stays
+  // 'http_requests' for compatibility.
   request_count: number
   upstream: OpsTrafficLink
   downstream: OpsTrafficLink

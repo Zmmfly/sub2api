@@ -46,7 +46,8 @@ func registerOpsTrafficEvent(c *gin.Context, ops *service.OpsService) {
 	event.Platform = strings.ToLower(strings.TrimSpace(event.Platform))
 	traffic.AfterFinalize(ctx, func(snapshot *traffic.Usage) {
 		// A WebSocket/hijacked request or a legacy route without a collector
-		// has no HTTP measurement. Do not fabricate a zero-byte event.
+		// has no HTTP measurement. Do not fabricate a zero-byte event; the
+		// turns of a client WebSocket session have their own events.
 		if snapshot == nil {
 			return
 		}
@@ -57,15 +58,92 @@ func registerOpsTrafficEvent(c *gin.Context, ops *service.OpsService) {
 			event.CreatedAt = time.Now().UTC()
 		}
 		event.Traffic = snapshot
-		// Cancellation of the client must not erase the failed HTTP request.
-		if err := ops.RecordTrafficEvent(context.Background(), event); err != nil {
-			// Saturation may reject many requests at once. Keep every failed
-			// counter, but do not turn a full telemetry queue into a log flood.
-			now := time.Now().Unix()
-			last := opsTrafficLastEnqueueFailureLog.Load()
-			if now-last >= 30 && opsTrafficLastEnqueueFailureLog.CompareAndSwap(last, now) {
-				log.Printf("[OpsTrafficLedger] request events not queued; coverage is incomplete (see traffic.ingestion)")
-			}
-		}
+		enqueueOpsTrafficEvent(ops, event)
 	})
+}
+
+// enqueueOpsTrafficEvent records one ledger event. Cancellation of the client
+// must not erase the failed request, so it never uses the request context.
+func enqueueOpsTrafficEvent(ops *service.OpsService, event *service.OpsTrafficEvent) {
+	if err := ops.RecordTrafficEvent(context.Background(), event); err != nil {
+		// Saturation may reject many requests at once. Keep every failed
+		// counter, but do not turn a full telemetry queue into a log flood.
+		now := time.Now().Unix()
+		last := opsTrafficLastEnqueueFailureLog.Load()
+		if now-last >= 30 && opsTrafficLastEnqueueFailureLog.CompareAndSwap(last, now) {
+			log.Printf("[OpsTrafficLedger] request events not queued; coverage is incomplete (see traffic.ingestion)")
+		}
+	}
+}
+
+// opsWSTurnTrafficRecorder writes one ledger event per turn of a client
+// WebSocket session: each turn is a request unit, like an HTTP request. The
+// hijacked handshake request itself has no event. It holds scalar copies only,
+// because turns end on relay goroutines and after the gin handler returned.
+type opsWSTurnTrafficRecorder struct {
+	ops       *service.OpsService
+	groupID   *int64
+	requestID string
+	platform  atomic.Pointer[string]
+}
+
+func newOpsWSTurnTrafficRecorder(c *gin.Context, ops *service.OpsService) *opsWSTurnTrafficRecorder {
+	if c == nil || c.Request == nil || ops == nil {
+		return nil
+	}
+	recorder := &opsWSTurnTrafficRecorder{ops: ops}
+	if apiKey := getOpsAPIKey(c); apiKey != nil && apiKey.GroupID != nil {
+		groupID := *apiKey.GroupID
+		recorder.groupID = &groupID
+	}
+	if requestID, ok := c.Request.Context().Value(ctxkey.RequestID).(string); ok {
+		recorder.requestID = requestID
+	}
+	recorder.refreshPlatform(c)
+	return recorder
+}
+
+// refreshPlatform resolves the platform as registerOpsTrafficEvent does, after
+// routing (for example a composite decision) updated the request context.
+func (r *opsWSTurnTrafficRecorder) refreshPlatform(c *gin.Context) {
+	if r == nil || c == nil || c.Request == nil {
+		return
+	}
+	platform := strings.ToLower(strings.TrimSpace(resolveOpsPlatform(c.Request.Context(), getOpsAPIKey(c), "")))
+	r.platform.Store(&platform)
+}
+
+// record receives every finalized turn, including failed turns without a
+// usage row. Its request ID matches the turn's usage row when there is one.
+func (r *opsWSTurnTrafficRecorder) record(turn service.OpenAIWSClientTurnTraffic) {
+	if r == nil || turn.Usage == nil || !r.ops.IsMonitoringEnabled(context.Background()) {
+		return
+	}
+	event := &service.OpsTrafficEvent{EventID: uuid.NewString(), RequestID: turn.RequestID, CreatedAt: turn.FinalizedAt, Traffic: turn.Usage}
+	if event.RequestID == "" {
+		event.RequestID = r.requestID
+	}
+	if platform := r.platform.Load(); platform != nil {
+		event.Platform = *platform
+	}
+	if r.groupID != nil {
+		groupID := *r.groupID
+		event.GroupID = &groupID
+	}
+	if turn.AccountID > 0 {
+		accountID := turn.AccountID
+		event.AccountID = &accountID
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	enqueueOpsTrafficEvent(r.ops, event)
+}
+
+// onTurnEnd returns the meter callback, or nil without a recorder.
+func (r *opsWSTurnTrafficRecorder) onTurnEnd() func(service.OpenAIWSClientTurnTraffic) {
+	if r == nil {
+		return nil
+	}
+	return r.record
 }

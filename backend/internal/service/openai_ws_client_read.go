@@ -23,7 +23,7 @@ func ReadOpenAIWSClientMessage(
 	timeoutStatus coderws.StatusCode,
 	timeoutReason string,
 ) (coderws.MessageType, []byte, error) {
-	return readOpenAIWSClientMessageWithTimeoutStart(
+	return readOpenAIWSClientMessageMetered(
 		controlCtx,
 		conn,
 		timeout,
@@ -31,13 +31,15 @@ func ReadOpenAIWSClientMessage(
 		timeoutReason,
 		nil,
 		nil,
+		nil,
 	)
 }
 
-// readOpenAIWSClientMessageWithTimeoutStart supports readers whose timeout
-// starts after a state transition, such as a completed passthrough turn. When
-// timeoutActive is nil, a positive timeout starts immediately.
-func readOpenAIWSClientMessageWithTimeoutStart(
+// readOpenAIWSClientMessageMetered supports readers whose timeout starts after
+// a state transition, such as a completed passthrough turn. When timeoutActive
+// is nil, a positive timeout starts immediately. A non-nil meter attributes the
+// read to the client connection's turns.
+func readOpenAIWSClientMessageMetered(
 	controlCtx context.Context,
 	conn *coderws.Conn,
 	timeout time.Duration,
@@ -45,6 +47,7 @@ func readOpenAIWSClientMessageWithTimeoutStart(
 	timeoutReason string,
 	timeoutStart <-chan struct{},
 	timeoutActive func() bool,
+	meter *OpenAIWSClientTraffic,
 ) (coderws.MessageType, []byte, error) {
 	if conn == nil {
 		return 0, nil, errors.New("openai websocket client connection is nil")
@@ -54,8 +57,10 @@ func readOpenAIWSClientMessageWithTimeoutStart(
 	}
 
 	readDone := make(chan openAIWSClientReadResult, 1)
+	meter.beforeRead()
 	go func() {
 		messageType, payload, err := conn.Read(context.Background())
+		meter.afterRead(len(payload), err)
 		readDone <- openAIWSClientReadResult{messageType: messageType, payload: payload, err: err}
 	}()
 

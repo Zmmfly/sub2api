@@ -103,6 +103,7 @@ type openAIWSConnLease struct {
 	ageBefore  time.Duration
 	reused     bool
 	released   atomic.Bool
+	traffic    atomic.Pointer[openAIWSTurnTraffic]
 }
 
 func (l *openAIWSConnLease) activeConn() (*openAIWSConn, error) {
@@ -223,7 +224,9 @@ func (l *openAIWSConnLease) ReadMessage(timeout time.Duration) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return conn.readMessageWithTimeout(timeout)
+	message, err := conn.readMessageWithTimeout(timeout)
+	l.noteTrafficReadFailure(err)
+	return message, err
 }
 
 func (l *openAIWSConnLease) ReadMessageContext(ctx context.Context) ([]byte, error) {
@@ -231,7 +234,9 @@ func (l *openAIWSConnLease) ReadMessageContext(ctx context.Context) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
-	return conn.readMessage(ctx)
+	message, err := conn.readMessage(ctx)
+	l.noteTrafficReadFailure(err)
+	return message, err
 }
 
 func (l *openAIWSConnLease) ReadMessageWithContextTimeout(ctx context.Context, timeout time.Duration) ([]byte, error) {
@@ -239,7 +244,9 @@ func (l *openAIWSConnLease) ReadMessageWithContextTimeout(ctx context.Context, t
 	if err != nil {
 		return nil, err
 	}
-	return conn.readMessageWithContextTimeout(ctx, timeout)
+	message, err := conn.readMessageWithContextTimeout(ctx, timeout)
+	l.noteTrafficReadFailure(err)
+	return message, err
 }
 
 func (l *openAIWSConnLease) PingWithTimeout(timeout time.Duration) error {
@@ -262,6 +269,7 @@ func (l *openAIWSConnLease) MarkBroken() {
 	if l == nil || l.pool == nil || l.conn == nil || l.released.Load() {
 		return
 	}
+	l.finishTraffic()
 	l.pool.evictConn(l.accountID, l.conn.id)
 }
 
@@ -269,6 +277,7 @@ func (l *openAIWSConnLease) Release() {
 	if l == nil || l.conn == nil {
 		return
 	}
+	l.finishTraffic()
 	if !l.released.CompareAndSwap(false, true) {
 		return
 	}

@@ -83,6 +83,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	if account == nil {
 		return errors.New("account is nil")
 	}
+	// Client WebSocket ingress meters its connection per turn; direct callers
+	// without a meter keep the unmeasured behavior.
+	clientTraffic := OpenAIWSClientTrafficFromContext(ctx)
 	// A handler may reuse the same gin context across account failover attempts.
 	// Never let an OAuth attempt's response aliases leak into the next account.
 	setCodexToolNameReverse(c, nil)
@@ -456,7 +459,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			eventBytes := buildOpenAIFastPolicyBlockedWSEvent(blocked)
 			if eventBytes != nil {
 				writeCtx, cancel := newOpenAIWSDownstreamWriteContext(ctx, hooks, s.openAIWSWriteTimeout())
-				_ = clientConn.Write(writeCtx, coderws.MessageText, eventBytes)
+				_ = clientTraffic.WriteClientMessage(writeCtx, clientConn, coderws.MessageText, eventBytes)
 				cancel()
 			}
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(
@@ -487,12 +490,13 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		writeCtx, cancel := newOpenAIWSDownstreamWriteContext(ctx, hooks, s.openAIWSWriteTimeout())
 		defer cancel()
 		message = restoreCodexToolNamesFromContext(c, message)
-		return clientConn.Write(writeCtx, coderws.MessageText, message)
+		return clientTraffic.WriteClientMessage(writeCtx, clientConn, coderws.MessageText, message)
 	}
 
+	// Every message returned here starts the next turn, even one rejected later.
 	readClientMessage := func() ([]byte, error) {
 		idleTimeout := s.openAIWSIngressInterTurnIdleTimeout()
-		msgType, payload, readErr := ReadOpenAIWSClientMessage(
+		msgType, payload, readErr := clientTraffic.ReadClientMessage(
 			ctx,
 			clientConn,
 			idleTimeout,
@@ -506,6 +510,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 			return nil, readErr
 		}
+		clientTraffic.BeginTurn()
 		if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
 			return nil, NewOpenAIWSClientCloseError(
 				coderws.StatusPolicyViolation,
@@ -677,7 +682,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				}
 			}
 			result, bridgeErr := s.proxyOpenAIWSHTTPBridgeTurn(
-				ctx,
+				// The turn's collector measures its HTTP attempts, retries included.
+				clientTraffic.TurnContext(ctx),
 				c,
 				account,
 				token,
@@ -696,6 +702,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 			if hooks != nil && hooks.AfterTurn != nil {
 				hooks.AfterTurn(turn, result, bridgeErr)
+			}
+			if bridgeErr == nil {
+				// A failed turn stays open for account failover or session close.
+				clientTraffic.EndTurn()
 			}
 			if bridgeErr != nil {
 				var failoverErr *UpstreamFailoverError
@@ -961,6 +971,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		if lease == nil {
 			return nil, errors.New("upstream websocket lease is nil")
 		}
+		// The session lease outlives turns; attribute this turn's part of it.
+		clientTraffic.beginLeaseTurnTraffic(lease)
 		turnStart := time.Now()
 		wroteDownstream := false
 		if err := lease.WriteJSONWithContextTimeout(ctx, json.RawMessage(payload), s.openAIWSWriteTimeout()); err != nil {
@@ -1845,6 +1857,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		if hooks != nil && hooks.AfterTurn != nil {
 			hooks.AfterTurn(turn, result, nil)
 		}
+		clientTraffic.EndTurn()
 		if result == nil {
 			return errors.New("websocket turn result is nil")
 		}

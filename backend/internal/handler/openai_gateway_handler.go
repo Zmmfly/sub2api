@@ -2491,7 +2491,16 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		c.Request = c.Request.WithContext(ctx)
 	}
 
-	wsConn, err := coderws.Accept(c.Writer, c.Request, &coderws.AcceptOptions{
+	// Each turn of the session is its own traffic unit. The hijack below still
+	// excludes the handshake request; the meter counts the upgraded connection
+	// and gives every turn a collector and a ledger event.
+	clientTraffic := service.NewOpenAIWSClientTraffic()
+	opsTurnTraffic := newOpsWSTurnTrafficRecorder(c, h.opsService)
+	clientTraffic.SetOnTurnEnd(opsTurnTraffic.onTurnEnd())
+	c.Request = c.Request.WithContext(service.WithOpenAIWSClientTraffic(c.Request.Context(), clientTraffic))
+	ctx = c.Request.Context()
+
+	wsConn, err := coderws.Accept(clientTraffic.WrapResponseWriter(c.Writer), c.Request, &coderws.AcceptOptions{
 		CompressionMode: coderws.CompressionContextTakeover,
 	})
 	if err != nil {
@@ -2509,10 +2518,13 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	defer func() {
 		_ = wsConn.CloseNow()
 	}()
+	// Runs before CloseNow: a turn still open (failed, aborted or cut off by
+	// the client) ends here, without the close handshake.
+	defer clientTraffic.Close()
 	wsConn.SetReadLimit(service.ResolveOpenAIWSClientReadLimitBytes(h.cfg))
 
 	firstMessageTimeout := service.ResolveOpenAIWSClientFirstMessageTimeout(h.cfg)
-	msgType, firstMessage, err := service.ReadOpenAIWSClientMessage(
+	msgType, firstMessage, err := clientTraffic.ReadClientMessage(
 		ctx,
 		wsConn,
 		firstMessageTimeout,
@@ -2536,6 +2548,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "missing first response.create message")
 		return
 	}
+	// The first turn starts with this message, even if it is rejected below.
+	clientTraffic.BeginTurn()
 	firstTurnStartedAt := time.Now()
 	if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "unsupported websocket message type")
@@ -2578,6 +2592,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		if decision.Matched {
 			c.Request = c.Request.WithContext(service.WithCompositeRouteDecision(c.Request.Context(), decision))
 			wsRouteModel = decision.UpstreamModel
+			opsTurnTraffic.refreshPlatform(c)
 		}
 	}
 	ctx = c.Request.Context()
@@ -2932,6 +2947,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		// Account selection starts a fresh upstream attempt. Clear any model
 		// captured by the previous failover account before credential lookup.
 		setOpsSelectedAccount(c, account.ID, account.Platform)
+		clientTraffic.SetAccountID(account.ID)
+		opsTurnTraffic.refreshPlatform(c)
 		currentAccountRelease = wrapReleaseOnDone(ctx, accountReleaseFunc)
 		if err := h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, apiKey.GroupID, sessionHash, account.ID); err != nil {
 			reqLog.Warn("openai.websocket_bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
@@ -3196,7 +3213,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				turnRecordPricingAt := turnPricing.currentOr(turnStart)
 				turnBillingAPIKey := turnBillingAPIKeys.forTurn(turn, apiKey)
 				cyberBlocked := service.GetOpsCyberPolicy(c) != nil
-				h.submitOpenAIUsageRecordTask(ctx, result, func(taskCtx context.Context) {
+				// The usage row waits for this turn's traffic snapshot, and the
+				// turn's ledger event carries the row's request ID.
+				turnUsageCtx := clientTraffic.TurnContext(ctx)
+				clientTraffic.SetTurnRequestID(service.OpenAIUsageLogRequestID(turnUsageCtx, result))
+				h.submitOpenAIUsageRecordTask(turnUsageCtx, result, func(taskCtx context.Context) {
 					if err := h.gatewayService.RecordUsage(taskCtx, &service.OpenAIRecordUsageInput{
 						Result:             result,
 						APIKey:             turnBillingAPIKey,
@@ -4087,7 +4108,7 @@ func writeContentModerationWSError(ctx context.Context, conn *coderws.Conn, deci
 	}
 	writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	_ = conn.Write(writeCtx, coderws.MessageText, payload)
+	_ = service.WriteOpenAIWSClientMessage(writeCtx, conn, coderws.MessageText, payload)
 }
 
 // writeCyberSessionBlockedWSError sends an error frame telling the client this
@@ -4113,7 +4134,7 @@ func writeCyberSessionBlockedWSError(ctx context.Context, conn *coderws.Conn) {
 	}
 	writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	_ = conn.Write(writeCtx, coderws.MessageText, payload)
+	_ = service.WriteOpenAIWSClientMessage(writeCtx, conn, coderws.MessageText, payload)
 }
 
 // cyberPolicyRecordedKey guards against double-firing recordCyberPolicyIfMarked
@@ -4433,6 +4454,14 @@ func (h *OpenAIGatewayHandler) recordCyberPolicyIfMarked(c *gin.Context, apiKey 
 	// Only the collector's successful-hijack state identifies WS ingress;
 	// an Upgrade header alone must not suppress ordinary HTTP traffic.
 	usageCollector := traffic.FromContext(requestCtx)
+	// A client WebSocket turn has its own collector and ledger event, which
+	// then carries this row's request ID.
+	if clientTraffic := service.OpenAIWSClientTrafficFromContext(requestCtx); clientTraffic.TurnCollector() != nil {
+		usageCollector = clientTraffic.TurnCollector()
+		if forwardErrored && gwSvc != nil && strings.TrimSpace(requestID) != "" {
+			clientTraffic.SetTurnRequestID(service.OpenAIUsageLogRequestID(context.Background(), &service.OpenAIForwardResult{RequestID: requestID}))
+		}
+	}
 	usagePool := h.usageRecordWorkerPool
 	apiKeyPrefix := ""
 	if apiKey != nil {

@@ -186,6 +186,40 @@ func TestOpsTrafficLedgerFreezesGinMetadataBeforeFinalizeAndCountsOnce(t *testin
 	require.Equal(t, service.PlatformOpenAI, event.Platform)
 }
 
+// docs/TRAFFIC_STATS.md: an HTTP request can include upstream WS and HTTP
+// fallback attempts, but contributes only one traffic ledger event.
+func TestOpsTrafficLedgerHTTPIngressCarriesUpstreamWebSocketTurn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ops, repo := newTrafficHandlerService(t)
+	router := gin.New()
+	router.Use(middleware.TrafficCapture(), OpsErrorLoggerMiddleware(ops))
+	router.POST("/v1/responses", func(c *gin.Context) {
+		collector := traffic.FromContext(c.Request.Context())
+		requestOriginal, requestActual := int64(500), int64(120)
+		responseOriginal, responseActual := int64(2000), int64(400)
+		// Recorded by the leased upstream WS turn (permessage-deflate).
+		collector.Record(traffic.UpstreamRequest, &requestOriginal, &requestActual, true)
+		collector.Record(traffic.UpstreamResponse, &responseOriginal, &responseActual, true)
+		fallback := int64(30)
+		collector.Record(traffic.UpstreamRequest, &fallback, &fallback, false)
+		collector.Record(traffic.UpstreamResponse, &fallback, &fallback, false)
+		c.String(http.StatusOK, "done")
+	})
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{}")))
+	ops.StopTrafficLedger()
+	require.Len(t, repo.events, 1)
+	upstream := repo.events[0].Traffic.Upstream
+	require.NotNil(t, upstream)
+	require.EqualValues(t, 530, *upstream.Request.OriginalBytes)
+	require.EqualValues(t, 150, *upstream.Request.ActualBytes)
+	require.True(t, upstream.Request.Compressed)
+	require.EqualValues(t, 2030, *upstream.Response.OriginalBytes)
+	require.EqualValues(t, 430, *upstream.Response.ActualBytes)
+	require.EqualValues(t, 4, *repo.events[0].Traffic.Downstream.Response.ActualBytes)
+}
+
+// docs/TRAFFIC_STATS.md: hijacked handshakes and uninstrumented WS routes have
+// no snapshot and must not fabricate a zero-byte ledger event.
 func TestOpsTrafficLedgerWSAndNoCollectorDoNotFabricateHTTP(t *testing.T) {
 	for _, websocket := range []bool{false, true} {
 		ops, repo := newTrafficHandlerService(t)

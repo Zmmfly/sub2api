@@ -25,9 +25,9 @@ type state struct {
 	// sharedLoaded records that initial shared-state loading has completed or
 	// that a fresher local transition has made a reload unnecessary.
 	sharedLoaded bool
-	// lastFallbackLog rate-limits warning-level fallback logs so a persistent
+	// lastFailureLog rate-limits warning-level preservation logs so a persistent
 	// upstream outage cannot flood the log while Debug still records each event.
-	lastFallbackLog time.Time
+	lastFailureLog time.Time
 }
 
 func newState() *state {
@@ -85,16 +85,16 @@ func (s *state) negotiationCandidateFailed(algorithm Algorithm) {
 	}
 }
 
-// claimFallbackLog returns true at most once per minute for one account, so a
+// claimFailureLog returns true at most once per minute for one account, so a
 // persistent failure cannot flood the warning log.
-func (s *state) claimFallbackLog(now time.Time) bool {
+func (s *state) claimFailureLog(now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !s.lastFallbackLog.IsZero() && now.Sub(s.lastFallbackLog) < time.Minute {
+	if !s.lastFailureLog.IsZero() && now.Sub(s.lastFailureLog) < time.Minute {
 		return false
 	}
-	s.lastFallbackLog = now
+	s.lastFailureLog = now
 	return true
 }
 
@@ -107,10 +107,8 @@ func (s *state) abortNegotiation() {
 	s.negotiating = false
 }
 
-// pinIdentity stops compression for the process lifetime and reports whether it
-// changed the state. It is used when a coded attempt failed and the identity
-// fallback could not prove the coding was safe, so the account must stay usable
-// without compression until the switch is toggled again or the process restarts.
+// pinIdentity finishes an exhausted initial negotiation and reports whether it
+// changed the state. Ordinary failures of a settled coding must not call it.
 func (s *state) pinIdentity() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

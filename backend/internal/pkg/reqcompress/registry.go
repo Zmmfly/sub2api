@@ -4,13 +4,14 @@
 // Providers accept different subsets of HTTP content codings for request
 // entities. An account that opts in begins with an ordered trial
 // (br -> zstd -> deflate) and keeps the first coding the upstream accepts.
-// A coding the upstream rejects is dropped, and a later rejection of the settled
-// coding degrades the account back to negotiation or identity.
+// A coding the upstream explicitly rejects is dropped. Ordinary HTTP and
+// transport failures preserve an already verified coding without identity
+// retries; only explicit coding rejections restart negotiation.
 //
 // The administrator's on/off switch is persisted in the account database row.
-// When Redis is configured, successful codings are also shared without a TTL so
-// other instances and later restarts can reuse them. Local memory remains the
-// hot-path cache; identity is not shared and may be probed again after restart.
+// When Redis is configured, successful codings are shared with a six-hour
+// sliding TTL refreshed by each account request. Local memory retains the
+// verified coding even if Redis is unavailable; identity is not shared.
 package reqcompress
 
 import (
@@ -29,6 +30,7 @@ type Registry struct {
 	mu            sync.RWMutex
 	entries       map[int64]*entry
 	shared        *redis.Client
+	sharedRefresh *redis.Client // shares the pool, with short renewal socket deadlines
 	levelProvider compresslevel.Provider
 }
 
@@ -63,6 +65,11 @@ type entry struct {
 	mu       sync.Mutex
 	syncedAt time.Time
 	state    *state
+	// sharedMu serializes every Redis write for this account (persist,
+	// refresh, delete) in call order. It is held across network I/O, so mu
+	// must never be held while taking it or while waiting on Redis: mu guards
+	// only short in-memory checks. Lock order: sharedMu, then mu, then state.mu.
+	sharedMu sync.Mutex
 }
 
 // Sync mirrors the persisted per-account switch into the registry.

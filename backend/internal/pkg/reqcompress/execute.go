@@ -5,7 +5,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/traffic"
 )
@@ -19,10 +18,10 @@ type SendFunc func(*http.Request) (*http.Response, error)
 // When the account is not opted in, the request is not eligible, or another
 // request already owns the trial, req is sent unchanged. Otherwise codings are
 // attempted in preference order and the first successful response is returned.
-// A coded attempt that fails with an ambiguous upstream error is retried once as
-// identity, so enabling compression can never turn a request that would
-// otherwise succeed into a failure. Recognized encoding rejections continue to
-// probe the remaining codings and end at identity as well.
+// Initial trials can try other codings and finally identity. Once a coding has
+// succeeded, HTTP and transport failures do not disprove that capability: the
+// original error is delivered without an identity retry or a cache reset. Only
+// an explicit request content-coding rejection retires a settled coding.
 //
 // A coded attempt may be discarded, so it is measured in its own probe
 // collector: only the attempt returned to the caller is adopted into the
@@ -42,14 +41,21 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 		return send(req)
 	}
 	negotiation := slot.currentState()
-	if negotiation == nil || !Eligible(req) {
+	if negotiation == nil || req == nil {
 		return send(req)
 	}
 	if err := r.hydrateShared(req.Context(), accountID, negotiation); err != nil {
 		// Without a readable shared snapshot, probing br again could overwrite a
 		// coding another instance already pinned. Send identity for this request
 		// and retry shared initialization on the next one.
-		slog.Warn("reqcompress shared state load failed", "account_id", accountID, "error", err)
+		slog.Warn("reqcompress shared state load failed",
+			append(requestLogFields(req, accountID, AlgorithmNone, nil), "error", err)...)
+		return send(req)
+	}
+	// Every account request renews a known coding, even when this particular
+	// body is too small, signed, or otherwise ineligible for compression.
+	r.refreshSharedAlgorithm(req.Context(), accountID, negotiation)
+	if !Eligible(req) {
 		return send(req)
 	}
 
@@ -59,14 +65,16 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 	}
 	levels := r.compressionLevels(req.Context())
 	lastStatus := 0
+	unverifiedCandidates := false
 	for len(work) > 0 {
 		algorithm := work[0]
 		work = work[1:]
 
 		attempt, err := encodeRequestWithLevels(req, algorithm, levels)
 		if err != nil {
-			slog.Warn("reqcompress encode failed", "account_id", accountID,
-				"algorithm", algorithm, "host", logHost(req), "method", req.Method, "error", err)
+			slog.Warn("reqcompress encode failed",
+				append(requestLogFields(req, accountID, algorithm, nil), "error", err,
+					"scope", "this_request_only")...)
 			if ownsNegotiation {
 				negotiation.abortNegotiation()
 			}
@@ -106,17 +114,22 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 			if ownsNegotiation {
 				negotiation.abortNegotiation()
 			}
+			logPreservedCoding(req, accountID, algorithm, negotiation, resp, "transport_error", err)
 			return resp, err
 		}
-		if !isEncodingRejection(resp) {
+		failureKind := inspectEncodingResponse(resp)
+		// A bare 415 may reject the media type, not the content coding. It can
+		// guide an unverified trial, but cannot invalidate a proven coding.
+		rejected := failureKind == responseFailureContentCoding ||
+			(ownsNegotiation && resp != nil && resp.StatusCode == http.StatusUnsupportedMediaType)
+		if !rejected {
 			if encodingAccepted(resp) {
 				adoptDeliveredAttempt(req, probe)
 				if ownsNegotiation {
 					negotiation.negotiationSucceeded(algorithm)
 					r.persistSharedAlgorithm(req.Context(), accountID, algorithm)
-					fields := []any{"account_id", accountID, "algorithm", algorithm,
-						"host", logHost(req), "method", req.Method,
-						"original_bytes", originalBytes, "compressed_bytes", attemptedBytes}
+					fields := append(requestLogFields(req, accountID, algorithm, resp),
+						"original_bytes", originalBytes, "compressed_bytes", attemptedBytes)
 					if hasOriginalBytes && originalBytes > 0 {
 						fields = append(fields, "ratio_percent", (1-float64(attemptedBytes)/float64(originalBytes))*100)
 					}
@@ -124,80 +137,43 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 				}
 				return resp, nil
 			}
-			if !shouldRetryIdentity(resp) {
-				if ownsNegotiation {
-					negotiation.abortNegotiation()
-				}
+			if !ownsNegotiation {
+				// Even an identity retry succeeding after a 5xx/403 says nothing
+				// about coding support: a transient outage may just have ended.
+				// Do not multiply traffic or discard a verified capability.
+				adoptDeliveredAttempt(req, probe)
+				logPreservedCoding(req, accountID, algorithm, negotiation, resp, failureKind, nil)
 				return resp, nil
 			}
-			status := resp.StatusCode
-			if ownsNegotiation {
-				// An ambiguous failure during the trial must still walk the
-				// preference order: a provider may reject brotli with a generic
-				// error while accepting zstd or deflate. If every coding fails,
-				// the loop ends with an identity attempt and pins identity.
-				slog.Warn("reqcompress coding unverified",
-					append([]any{"account_id", accountID, "algorithm", algorithm,
-						"status", status, "host", logHost(req), "method", req.Method,
-						"upstream_request_id", upstreamRequestID(resp)},
-						discardedAttemptLogFields(probe)...)...)
-				drainAndClose(resp)
-				negotiation.negotiationCandidateFailed(algorithm)
-				continue
+			if !shouldProbeAfterBodyReadFailure(resp, failureKind) {
+				// A business/auth/rate/health error also proves nothing during
+				// the initial trial. Do not upload the body four times or pin
+				// identity just because the provider is temporarily unhealthy.
+				negotiation.abortNegotiation()
+				adoptDeliveredAttempt(req, probe)
+				return resp, nil
 			}
-			// The settled coding failed with an error that may or may not be
-			// coding-related. Retry once as identity so the feature cannot turn a
-			// request that would otherwise succeed into a failure.
-			fallbackFields := append([]any{"account_id", accountID, "algorithm", algorithm,
-				"status", status, "host", logHost(req), "method", req.Method,
-				"upstream_request_id", upstreamRequestID(resp)},
-				discardedAttemptLogFields(probe)...)
-			if negotiation.claimFallbackLog(time.Now()) {
-				slog.Warn("reqcompress identity fallback", fallbackFields...)
-			} else {
-				slog.Debug("reqcompress identity fallback", fallbackFields...)
-			}
+			// Some providers use this specific diagnostic when they cannot
+			// decode a compressed body. Try other codings only in an unverified
+			// trial, without permanently removing this ambiguous candidate.
+			unverifiedCandidates = true
+			fields := append(requestLogFields(req, accountID, algorithm, resp),
+				"reason", failureKind, "error_source", "upstream_response")
+			slog.Warn("reqcompress coding unverified", append(fields, discardedAttemptLogFields(probe)...)...)
 			drainAndClose(resp)
-			identityResp, identityErr := send(req)
-			if identityErr != nil {
-				if ownsNegotiation {
-					// A failed trial must not keep probing on every request.
-					if negotiation.pinIdentity() {
-						slog.Warn("reqcompress pinned identity", "account_id", accountID,
-							"algorithm", algorithm, "status", status, "host", logHost(req),
-							"method", req.Method, "reason", "fallback_error", "error", identityErr)
-					}
-				}
-				return identityResp, identityErr
-			}
-			if ownsNegotiation || encodingAccepted(identityResp) {
-				// A successful identity attempt proves the coding caused the
-				// failure; a failed one during the trial still must not keep
-				// re-probing on every request.
-				reason := "fallback_succeeded"
-				if !encodingAccepted(identityResp) {
-					reason = "trial_failed"
-				}
-				if negotiation.pinIdentity() {
-					if !ownsNegotiation {
-						r.deleteSharedAlgorithm(req.Context(), accountID, algorithm)
-					}
-					slog.Warn("reqcompress pinned identity", "account_id", accountID,
-						"algorithm", algorithm, "status", status, "host", logHost(req),
-						"method", req.Method, "reason", reason)
-				}
-			}
-			return identityResp, nil
+			continue
 		}
-		status := resp.StatusCode
 		slog.Warn("reqcompress coding rejected",
-			append([]any{"account_id", accountID, "algorithm", algorithm,
-				"status", status, "host", logHost(req), "method", req.Method,
-				"upstream_request_id", upstreamRequestID(resp)},
-				discardedAttemptLogFields(probe)...)...)
+			append(requestLogFields(req, accountID, algorithm, resp), discardedAttemptLogFields(probe)...)...)
 		drainAndClose(resp)
 		if ownsNegotiation {
-			negotiation.negotiationCandidateFailed(algorithm)
+			if failureKind == responseFailureContentCoding {
+				negotiation.negotiationCandidateFailed(algorithm)
+			} else {
+				// A bare 415 can reject Content-Type for every representation.
+				// Keep this candidate unless a plain attempt actually succeeds.
+				unverifiedCandidates = true
+			}
 			continue
 		}
 		// The settled coding broke: drop it and, when this request becomes the
@@ -207,21 +183,32 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 		if !owns {
 			break
 		}
-		slog.Warn("reqcompress settled coding retired", "account_id", accountID,
-			"algorithm", algorithm, "status", status, "host", logHost(req),
-			"method", req.Method, "remaining_candidates", len(next))
+		slog.Warn("reqcompress settled coding retired",
+			append(requestLogFields(req, accountID, algorithm, resp), "remaining_candidates", len(next),
+				"reason", responseFailureContentCoding)...)
 		ownsNegotiation = true
 		work = append(work, next...)
 	}
+	identityResp, identityErr := send(req)
 	if ownsNegotiation {
-		negotiation.pinIdentity()
-		slog.Warn("reqcompress no coding accepted", "account_id", accountID,
-			"host", logHost(req), "method", req.Method, "last_status", lastStatus)
-		slog.Warn("reqcompress pinned identity", "account_id", accountID,
-			"host", logHost(req), "method", req.Method,
-			"reason", "all_codings_failed", "last_status", lastStatus)
+		if !unverifiedCandidates || (identityErr == nil && encodingAccepted(identityResp)) {
+			negotiation.pinIdentity()
+			reason := "all_codings_rejected"
+			if unverifiedCandidates {
+				reason = "initial_identity_accepted"
+			}
+			fields := append(requestLogFields(req, accountID, AlgorithmNone, identityResp),
+				"reason", reason, "last_status", lastStatus)
+			slog.Warn("reqcompress no coding accepted", fields...)
+			slog.Warn("reqcompress pinned identity", fields...)
+		} else {
+			// Neither compressed nor plain attempts worked: preserve the
+			// unverified candidates for a later request instead of turning
+			// a transient upstream/read failure into a permanent downgrade.
+			negotiation.abortNegotiation()
+		}
 	}
-	return send(req)
+	return identityResp, identityErr
 }
 
 // encodingAccepted reports whether a response proves the upstream decoded the

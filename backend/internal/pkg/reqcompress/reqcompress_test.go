@@ -220,7 +220,7 @@ func TestExecuteRenegotiatesAfterSettledCodingBreaks(t *testing.T) {
 	require.Equal(t, []string{"zstd"}, seen)
 }
 
-func TestExecuteProbesRemainingCodingsOnAmbiguousError(t *testing.T) {
+func TestExecuteProbesRemainingCodingsOnInitialBodyReadFailure(t *testing.T) {
 	body := testBody()
 	registry := NewRegistry()
 	registry.Sync(4, true, time.Time{})
@@ -233,8 +233,8 @@ func TestExecuteProbesRemainingCodingsOnAmbiguousError(t *testing.T) {
 		switch Algorithm(encoding) {
 		case AlgorithmBrotli:
 			return &http.Response{
-				StatusCode: http.StatusForbidden,
-				Body:       io.NopCloser(strings.NewReader(`{"error":"rejected request"}`)),
+				StatusCode: http.StatusBadRequest,
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"Failed to read request body"}}`)),
 			}, nil
 		default:
 			return okResponse(encoding), nil
@@ -255,7 +255,7 @@ func TestExecuteProbesRemainingCodingsOnAmbiguousError(t *testing.T) {
 	require.Equal(t, []string{"zstd"}, sent)
 }
 
-func TestExecutePinsIdentityWhenEveryCodingFails(t *testing.T) {
+func TestExecuteKeepsTrialOnOrdinaryBusinessFailure(t *testing.T) {
 	body := testBody()
 	registry := NewRegistry()
 	registry.Sync(13, true, time.Time{})
@@ -272,15 +272,15 @@ func TestExecutePinsIdentityWhenEveryCodingFails(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	require.Equal(t, "messages: invalid role", errorMessage(t, resp.Body))
-	require.Equal(t, []string{"br", "zstd", "deflate", ""}, sent)
+	require.Equal(t, []string{"br"}, sent)
 
-	// The trial must not keep probing on every request after all codings failed;
-	// identity is pinned and the error is returned directly.
+	// A business failure is not a coding rejection. Do not amplify one request
+	// into four uploads, or poison capability negotiation for later requests.
 	sent = nil
 	resp, err = registry.Execute(13, newTestRequest(t, body), send)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.Equal(t, []string{""}, sent)
+	require.Equal(t, []string{"br"}, sent)
 }
 
 func TestExecuteDoesNotFallbackOnRateLimit(t *testing.T) {
@@ -305,7 +305,7 @@ func TestExecuteDoesNotFallbackOnRateLimit(t *testing.T) {
 	require.Equal(t, []string{"br"}, sent)
 }
 
-func TestExecuteSettledCodingFallsBackToIdentity(t *testing.T) {
+func TestExecuteSettledCodingPreservesCompressionOnHTTPFailure(t *testing.T) {
 	body := testBody()
 	registry := NewRegistry()
 	registry.Sync(15, true, time.Time{})
@@ -329,17 +329,19 @@ func TestExecuteSettledCodingFallsBackToIdentity(t *testing.T) {
 		return okResponse("identity"), nil
 	})
 	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Equal(t, []string{"br", ""}, sent)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	require.Equal(t, []string{"br"}, sent)
+	require.Equal(t, `{"error":"rejected request"}`, readAll(t, resp.Body))
+	require.NoError(t, resp.Body.Close())
 
-	// Identity succeeded where the coding failed, so compression is pinned off.
+	// An ordinary HTTP failure must not retire a previously verified coding.
 	sent = nil
 	_, err = registry.Execute(15, newTestRequest(t, body), func(req *http.Request) (*http.Response, error) {
 		sent = append(sent, req.Header.Get("Content-Encoding"))
 		return okResponse("ok"), nil
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{""}, sent)
+	require.Equal(t, []string{"br"}, sent)
 }
 
 func TestExecuteTreatsEmptyUnsupportedMediaTypeAsRejection(t *testing.T) {

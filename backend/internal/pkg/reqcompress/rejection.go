@@ -2,6 +2,7 @@ package reqcompress
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -12,9 +13,9 @@ import (
 const maxRejectionBodyBytes int64 = 64 << 10
 
 // rejectionStatuses are the statuses an upstream may use when it cannot decode
-// a request entity. These need an encoding keyword in the body; 415 alone is
-// authoritative. Other statuses (including 401/429/529) prove nothing about the
-// coding.
+// a request entity. A settled coding requires an explicit content-coding error;
+// a bare 415 may instead reject Content-Type. Other statuses (including
+// 401/429/529) prove nothing about the coding.
 var rejectionStatuses = map[int]struct{}{
 	http.StatusBadRequest:          {},
 	http.StatusUnprocessableEntity: {},
@@ -34,85 +35,129 @@ var rejectionKeywords = []string{
 	"unsupported content coding",
 	"invalid encoding",
 	"invalid_encoding",
-	"cannot decode",
-	"could not decode",
-	"unable to decode",
-	"failed to decode",
-	"error decoding",
-	"decompress",
-	"brotli",
-	"zstd",
-	"deflate",
 }
 
-// shouldRetryIdentity reports whether a non-success response is ambiguous enough
-// that an identity attempt should be tried. Clear auth/routing/rate signals are
-// excluded: identity cannot change them and a second attempt only adds load.
-// 403 stays eligible because WAF/CDN layers commonly answer a body they cannot
-// inspect with a generic "rejected request".
-func shouldRetryIdentity(resp *http.Response) bool {
-	if resp == nil || resp.StatusCode < 400 {
-		return false
-	}
-	switch resp.StatusCode {
-	case http.StatusUnauthorized,
-		http.StatusNotFound,
-		http.StatusMethodNotAllowed,
-		http.StatusProxyAuthRequired,
-		http.StatusRequestTimeout,
-		http.StatusTooManyRequests:
-		return false
-	case 529: // Anthropic "overloaded"
-		return false
-	}
-	return true
+// Only this specific 400/422 diagnostic can guide an unverified trial without
+// explicit coding evidence. Business errors and upstream outages never justify
+// multiplying uploads or discarding a coding candidate.
+func shouldProbeAfterBodyReadFailure(resp *http.Response, kind string) bool {
+	return resp != nil && kind == responseFailureBodyRead &&
+		(resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity)
 }
 
-// isEncodingRejection consumes and inspects a small error body and reports
-// whether the upstream rejected the request because of its Content-Encoding.
-// The body is always restored for the caller; a rejected attempt is closed by
-// the caller instead of being returned.
-func isEncodingRejection(resp *http.Response) bool {
+const (
+	responseFailureHTTP          = "http_error"
+	responseFailureContentCoding = "content_coding_rejected"
+	responseFailureMediaType     = "unsupported_media_type"
+	responseFailureBodyRead      = "request_body_read"
+)
+
+// inspectEncodingResponse classifies a bounded diagnostic without changing the
+// response delivered to the caller. Generic body-read errors are not proof of
+// unsupported compression: the upstream may have received a truncated upload.
+func inspectEncodingResponse(resp *http.Response) string {
+	kind := responseFailureHTTP
 	if resp == nil {
-		return false
+		return kind
 	}
-	// 415 is explicitly about an entity representation the server refuses and
-	// needs no diagnostic body to be conclusive.
 	if resp.StatusCode == http.StatusUnsupportedMediaType {
-		return true
+		kind = responseFailureMediaType
 	}
 	if resp.Body == nil || resp.Body == http.NoBody {
-		return false
+		return kind
 	}
-	if _, ok := rejectionStatuses[resp.StatusCode]; !ok {
-		return false
+	if _, ok := rejectionStatuses[resp.StatusCode]; !ok && kind != responseFailureMediaType {
+		return kind
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRejectionBodyBytes+1))
+	original := resp.Body
+	var reader io.Reader = io.MultiReader(bytes.NewReader(body), original)
 	if err != nil {
-		resp.Body = &replayBody{reader: bytes.NewReader(body), closer: resp.Body}
-		return false
+		// Inspection must not turn an upstream read error into a clean EOF.
+		reader = io.MultiReader(bytes.NewReader(body), &replayReadError{err: err}, original)
 	}
-	if int64(len(body)) > maxRejectionBodyBytes {
-		// Too large to be an encoding diagnostics message. Restore the full
-		// stream, including the unread remainder.
-		resp.Body = &replayBody{reader: io.MultiReader(bytes.NewReader(body), resp.Body), closer: resp.Body}
-		return false
+	resp.Body = &replayBody{reader: reader, closer: original}
+	if err != nil || int64(len(body)) > maxRejectionBodyBytes {
+		return kind
 	}
-	resp.Body = &replayBody{reader: bytes.NewReader(body), closer: resp.Body}
-	return mentionsEncodingRejection(body)
+	message := diagnosticMessage(body)
+	if mentionsEncodingRejection(message) {
+		return responseFailureContentCoding
+	}
+	if strings.Contains(strings.ToLower(message), "failed to read request body") {
+		return responseFailureBodyRead
+	}
+	return kind
 }
 
-func mentionsEncodingRejection(body []byte) bool {
-	if len(body) == 0 {
+// Only inspect an error's message, not an echoed payload or unrelated JSON
+// fields containing codec names. Never include this untrusted text in logs.
+func diagnosticMessage(body []byte) string {
+	var envelope struct {
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
+		Detail  string          `json:"detail"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		// Large/HTML error pages often contain unrelated diagnostic text.
+		// Only a short plain-text diagnostic can be coding evidence.
+		if len(body) > 1024 || bytes.ContainsAny(body, "<>") {
+			return ""
+		}
+		return string(body)
+	}
+	var nested struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(envelope.Error, &nested) == nil && nested.Message != "" {
+		return nested.Message
+	}
+	var text string
+	if json.Unmarshal(envelope.Error, &text) == nil && text != "" {
+		return text
+	}
+	if envelope.Message != "" {
+		return envelope.Message
+	}
+	return envelope.Detail
+}
+
+func mentionsEncodingRejection(message string) bool {
+	lower := strings.ToLower(message)
+	// Upstream response decoding is unrelated to the submitted request coding.
+	if strings.Contains(lower, "response") {
 		return false
 	}
-	lower := strings.ToLower(string(body))
 	for _, keyword := range rejectionKeywords {
 		if strings.Contains(lower, keyword) {
 			return true
 		}
 	}
+	if strings.Contains(lower, "decompress request") || strings.Contains(lower, "decompress the request") ||
+		strings.Contains(lower, "decompress body") || strings.Contains(lower, "decompress payload") ||
+		strings.Contains(lower, "decompress entity") || strings.Contains(lower, "decompress content") {
+		return true
+	}
+	for _, coding := range []string{"brotli", "zstd", "deflate"} {
+		if strings.Contains(lower, "unsupported "+coding) ||
+			strings.Contains(lower, coding+" is not supported") ||
+			strings.Contains(lower, "invalid "+coding) ||
+			(strings.Contains(lower, coding) && strings.Contains(lower, "decode")) {
+			return true
+		}
+	}
 	return false
+}
+
+type replayReadError struct{ err error }
+
+func (r *replayReadError) Read([]byte) (int, error) {
+	if r.err == nil {
+		return 0, io.EOF
+	}
+	err := r.err
+	r.err = nil
+	return 0, err
 }
 
 // replayBody serves an already-consumed prefix while keeping the original Close

@@ -6,8 +6,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -45,9 +47,9 @@ func TestExecuteLogsObservabilityEvents(t *testing.T) {
 		sent = append(sent, encoding)
 		if encoding == "br" {
 			return &http.Response{
-				StatusCode: http.StatusForbidden,
+				StatusCode: http.StatusBadRequest,
 				Header:     http.Header{"X-Request-Id": []string{"req-abc"}},
-				Body:       io.NopCloser(strings.NewReader(`{"error":"rejected request"}`)),
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"Failed to read request body"}}`)),
 			}, nil
 		}
 		return okResponse("zstd"), nil
@@ -61,13 +63,14 @@ func TestExecuteLogsObservabilityEvents(t *testing.T) {
 	require.Contains(t, out, "content_encoding=br")
 	require.Contains(t, out, `level=WARN msg="reqcompress coding unverified"`)
 	require.Contains(t, out, "algorithm=br")
-	require.Contains(t, out, "status=403")
+	require.Contains(t, out, "status=400")
+	require.Contains(t, out, "reason=request_body_read")
 	require.Contains(t, out, "upstream_request_id=req-abc")
 	require.Contains(t, out, `level=INFO msg="reqcompress coding settled"`)
 	require.Contains(t, out, "algorithm=zstd")
 }
 
-func TestExecuteLogsSettledIdentityFallback(t *testing.T) {
+func TestExecuteLogsSettledCodingPreserved(t *testing.T) {
 	logs := captureLogs(t)
 	body := testBody()
 	registry := NewRegistry()
@@ -94,16 +97,37 @@ func TestExecuteLogsSettledIdentityFallback(t *testing.T) {
 		return okResponse("identity"), nil
 	})
 	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Equal(t, []string{"br", ""}, sent)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	require.Equal(t, []string{"br"}, sent)
 
 	out := logs.String()
-	require.Contains(t, out, `level=WARN msg="reqcompress identity fallback"`)
+	require.Contains(t, out, `level=WARN msg="reqcompress coding preserved"`)
 	require.Contains(t, out, "algorithm=br")
 	require.Contains(t, out, "status=403")
 	require.Contains(t, out, "upstream_request_id=req-abc")
-	require.Contains(t, out, `level=WARN msg="reqcompress pinned identity"`)
-	require.Contains(t, out, "reason=fallback_succeeded")
+	require.Contains(t, out, "direction=upstream")
+	require.Contains(t, out, "error_source=upstream_response")
+	require.Contains(t, out, "coding_preserved=true")
+	require.Contains(t, out, "identity_retry=false")
+	require.NotContains(t, out, "reqcompress pinned identity")
+}
+
+func TestExecuteLogsTransportClassificationWithoutURLCredentials(t *testing.T) {
+	logs := captureLogs(t)
+	registry := NewRegistry()
+	settleTestState(t, registry, 817, AlgorithmBrotli)
+	failure := &url.Error{Op: "Post", URL: "https://private-user:private-password@upstream.test/?key=private-token", Err: syscall.ECONNRESET}
+	_, err := registry.Execute(817, newTestRequest(t, testBody()), func(*http.Request) (*http.Response, error) {
+		return nil, failure
+	})
+	require.ErrorIs(t, err, syscall.ECONNRESET)
+	out := logs.String()
+	require.Contains(t, out, "error_source=upstream_transport")
+	require.Contains(t, out, "error_kind=connection_reset")
+	require.Contains(t, out, "coding_preserved=true")
+	require.NotContains(t, out, "private-password")
+	require.NotContains(t, out, "private-token")
+	require.NotContains(t, out, "private-user")
 }
 
 func TestExecuteLogsDiscardedProbeBytes(t *testing.T) {

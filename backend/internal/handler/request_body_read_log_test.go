@@ -3,6 +3,7 @@
 package handler
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -13,7 +14,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
+	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -100,4 +103,36 @@ func TestRequestBodyReadCancelledWritesNoBody(t *testing.T) {
 	require.Empty(t, rec.Body.String())
 	require.Len(t, logs.All(), 1)
 	require.Equal(t, "client_disconnect", logs.All()[0].ContextMap()["error_kind"])
+}
+
+func TestRequestBodyReadHTTP1DeadlineReturns408FromHandlerHelper(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	router := gin.New()
+	router.POST("/v1/responses", func(c *gin.Context) {
+		c.Request = c.Request.WithContext(logger.IntoContext(c.Request.Context(), zap.New(core)))
+		_, err := readLenientJSONRequestBodyWithPrealloc(c.Request, nil)
+		if !handleRequestBodyReadError(c, err) {
+			c.Status(http.StatusInternalServerError)
+		}
+	})
+	server := httptest.NewServer(pkghttputil.WithWriteTimeout(
+		pkghttputil.WithBodyReadTimeout(router, 50*time.Millisecond), time.Second))
+	defer server.Close()
+	conn, err := net.DialTimeout("tcp", server.Listener.Addr().String(), time.Second)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	require.NoError(t, conn.SetDeadline(time.Now().Add(3*time.Second)))
+	_, err = io.WriteString(conn, "POST /v1/responses HTTP/1.1\r\nHost: test\r\nContent-Length: 1024\r\n\r\nx")
+	require.NoError(t, err)
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusRequestTimeout, resp.StatusCode)
+	require.Contains(t, string(body), "Request body upload timed out")
+	entries := logs.All()
+	require.Len(t, entries, 1)
+	require.Equal(t, zapcore.WarnLevel, entries[0].Level)
+	require.Equal(t, "timeout", entries[0].ContextMap()["error_kind"])
 }

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"go.uber.org/zap"
@@ -239,5 +240,51 @@ func TestRequestBodyReadFailureReleasesBudget(t *testing.T) {
 		if used != 0 {
 			t.Fatalf("failed read leaked %d budget bytes", used)
 		}
+	}
+}
+
+func TestRequestBodyReadDeadlinePreservesCauseAndReleasesBudget(t *testing.T) {
+	budget := NewBodyMemoryBudget(1 << 20)
+	type readResult struct {
+		err, contextErr error
+		used            int64
+	}
+	done := make(chan readResult, 1)
+	server := httptest.NewServer(WithBodyReadTimeout(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, release := WithRequestBodyMemoryBudget(r.Context(), budget)
+		defer release()
+		_, err := ReadRequestBodyWithPrealloc(r.WithContext(ctx))
+		budget.mu.Lock()
+		used := budget.used
+		budget.mu.Unlock()
+		done <- readResult{err, ctx.Err(), used}
+		w.WriteHeader(http.StatusRequestTimeout)
+	}), 50*time.Millisecond))
+	defer server.Close()
+	conn, err := net.DialTimeout("tcp", server.Listener.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(conn, "POST / HTTP/1.1\r\nHost: test\r\nContent-Length: 1024\r\n\r\nx"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		var netErr net.Error
+		if !IsRequestBodyReadDeadline(got.err) || !errors.As(got.err, &netErr) || !netErr.Timeout() {
+			t.Fatalf("read lost original timeout cause: %v", got.err)
+		}
+		if !errors.Is(got.contextErr, context.Canceled) || errors.Is(got.err, context.Canceled) {
+			t.Fatalf("read deadline must survive HTTP/1 context cancellation: err=%v context=%v", got.err, got.contextErr)
+		}
+		if got.used != 0 {
+			t.Fatalf("timed-out read retained %d budget bytes before handler cleanup", got.used)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("upload deadline did not release reader")
 	}
 }

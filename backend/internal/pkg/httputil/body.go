@@ -177,6 +177,9 @@ func readRequestBodyChunksWithBudget(ctx context.Context, reader io.Reader, init
 			read, err = reader.Read(chunk[n:])
 			n += read
 		}
+		if IsRequestBodyReadDeadline(err) {
+			return requestBodyBuffer{}, err
+		}
 		if err := ctx.Err(); err != nil {
 			return requestBodyBuffer{}, err
 		}

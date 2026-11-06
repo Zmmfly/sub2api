@@ -51,6 +51,12 @@ func (r *bodyReadTimeout) Read(p []byte) (int, error) {
 		return 0, err
 	}
 	n, readErr := r.ReadCloser.Read(p)
+	if err == nil && IsRequestBodyReadTimeout(readErr) {
+		// Preserve evidence that an actual socket read hit the deadline we set.
+		// HTTP/1 cancels its request context before returning this read error;
+		// context.Canceled by itself cannot distinguish that from a disconnect.
+		readErr = &requestBodyReadDeadlineError{cause: readErr}
+	}
 	if errors.Is(readErr, io.EOF) {
 		r.finished.Store(true)
 	} else if readErr != nil {

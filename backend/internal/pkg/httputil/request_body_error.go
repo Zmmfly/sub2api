@@ -101,6 +101,24 @@ func IsRequestBodyReadTimeout(err error) bool {
 	return RequestBodyReadErrorKind(err) == RequestBodyErrorKindTimeout
 }
 
+// requestBodyReadDeadlineError identifies a timeout observed by the wrapper
+// that sets our upload read deadline. net/http also cancels the HTTP/1 request
+// context on this error, which must not hide the deadline's original cause.
+type requestBodyReadDeadlineError struct{ cause error }
+
+func (e *requestBodyReadDeadlineError) Error() string { return e.cause.Error() }
+func (e *requestBodyReadDeadlineError) Unwrap() error { return e.cause }
+
+// IsRequestBodyReadDeadline reports a timeout from the upload read deadline
+// installed by WithBodyReadTimeout, rather than a cancellation alone. Callers
+// may report this timeout even when net/http has subsequently canceled the
+// request context. Shared body readers still reject a context that was already
+// canceled before starting the read.
+func IsRequestBodyReadDeadline(err error) bool {
+	var deadlineErr *requestBodyReadDeadlineError
+	return errors.As(err, &deadlineErr)
+}
+
 // ContentEncodingCategory maps request Content-Encoding headers onto a fixed
 // label set so arbitrary client-supplied values never reach logs.
 func ContentEncodingCategory(header http.Header) string {
@@ -142,7 +160,7 @@ func logRequestBodyReadFailure(req *http.Request, err error) {
 		zap.Int64("content_length", req.ContentLength),
 	}
 	log := logger.FromContext(ctx)
-	if kind == RequestBodyErrorKindClientDisconnect || ctx.Err() != nil {
+	if kind == RequestBodyErrorKindClientDisconnect || (ctx.Err() != nil && !IsRequestBodyReadDeadline(err)) {
 		log.Info("read request body failed", fields...)
 		return
 	}

@@ -15,7 +15,7 @@ import (
 // and stalled uploads (408) before callers classify malformed or oversized
 // request bodies. Failure logging happens once in the shared reader (httputil).
 func handleRequestBodyReadError(c *gin.Context, err error) bool {
-	if err != nil && failoverClientGone(c) {
+	if err != nil && !pkghttputil.IsRequestBodyReadDeadline(err) && failoverClientGone(c) {
 		c.Abort()
 		return true
 	}

@@ -293,7 +293,10 @@ func (r *Registry) refreshSharedAlgorithm(ctx context.Context, accountID int64, 
 
 func claimSharedRefreshLog(accountID int64, now time.Time) bool {
 	value, _ := sharedRefreshLogTimes.LoadOrStore(accountID, new(atomic.Int64))
-	last := value.(*atomic.Int64)
+	last, ok := value.(*atomic.Int64)
+	if !ok || last == nil {
+		return false
+	}
 	nowNanos := now.UnixNano()
 	for {
 		previous := last.Load()

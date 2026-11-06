@@ -214,7 +214,7 @@ func TestBodyReadTimeoutHTTP2DoesNotCancelOtherStreams(t *testing.T) {
 	readDone := make(chan error, 1)
 	srv := httptest.NewUnstartedServer(WithBodyReadTimeout(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/slow" {
-			_, err := io.ReadAll(r.Body)
+			_, err := ReadRequestBodyWithPrealloc(r)
 			readDone <- err
 			return
 		}
@@ -243,8 +243,8 @@ func TestBodyReadTimeoutHTTP2DoesNotCancelOtherStreams(t *testing.T) {
 	}()
 	select {
 	case err := <-readDone:
-		if err == nil {
-			t.Fatal("stalled HTTP/2 upload accepted")
+		if !IsRequestBodyReadDeadline(err) || !IsRequestBodyReadTimeout(err) {
+			t.Fatalf("stalled HTTP/2 upload lost its read deadline: %v", err)
 		}
 	case <-ctx.Done():
 		t.Fatal("stalled HTTP/2 upload retained handler")

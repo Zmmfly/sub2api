@@ -71,7 +71,7 @@ func inspectEncodingResponse(resp *http.Response) string {
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRejectionBodyBytes+1))
 	original := resp.Body
-	var reader io.Reader = io.MultiReader(bytes.NewReader(body), original)
+	reader := io.MultiReader(bytes.NewReader(body), original)
 	if err != nil {
 		// Inspection must not turn an upstream read error into a clean EOF.
 		reader = io.MultiReader(bytes.NewReader(body), &replayReadError{err: err}, original)

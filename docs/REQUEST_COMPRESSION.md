@@ -35,6 +35,8 @@
 
 入站读取日志使用固定分类：`timeout`、`truncated_body`、`client_disconnect`、`decode_content_encoding`、`unsupported_content_encoding`、`max_bytes`、`capacity` 等；不记录请求正文或原始解码错误。上传超时返回 HTTP 408；损坏/截断请求仍为 400，体积限制仍为 413，缓冲容量不足仍为 503，已取消请求保持不写响应体的 499 路径。
 
+HTTP/1 的 socket 读取超时也会导致 Go 取消请求 context，因此不能仅凭 `context.Canceled` 判定客户端主动断开。网关保留自身上传读取期限产生的原始 timeout，记录 Warn 并在响应尚未提交、连接仍可写时返回 408；真正断连或读取前已取消仍走 499。已提交的响应不会追加错误 JSON，连接已断开时也不保证客户端能收到状态码。
+
 响应压缩中的 EPIPE、连接重置等明确下游断连记为 Info，每个请求只记录一次；真实写超时和压缩器初始化故障保持 Warn。写失败不会尝试在已输出的压缩流中混入未压缩数据。
 
 压缩状态保留日志按账号每分钟最多一条 Warn，其余记录在 Debug；日志带本地 `request_id`（如果请求上下文提供）和上游 `upstream_request_id`（如果响应提供），便于关联。不要只按某一条下游 broken-pipe 日志推断账号请求压缩已失效。

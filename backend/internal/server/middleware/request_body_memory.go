@@ -13,7 +13,7 @@ import (
 // handler runs. Cancelled clients have no response body and an uncommitted
 // response is marked 499, matching the gateway handler's cancellation path.
 func RejectRequestBodyReadError(c *gin.Context, err error) bool {
-	if err != nil && c != nil && c.Request != nil && c.Request.Context().Err() != nil {
+	if err != nil && c != nil && c.Request != nil && c.Request.Context().Err() != nil && !pkghttputil.IsRequestBodyReadDeadline(err) {
 		if !c.Writer.Written() {
 			c.Status(499)
 		}
@@ -32,6 +32,11 @@ func RejectRequestBodyReadError(c *gin.Context, err error) bool {
 func RejectRequestBodyReadTimeout(c *gin.Context, err error) bool {
 	if c == nil || !pkghttputil.IsRequestBodyReadTimeout(err) {
 		return false
+	}
+	if c.Writer.Written() {
+		// Never append an error document to an already committed stream.
+		c.Abort()
+		return true
 	}
 	const message = "Request body upload timed out"
 	path := ""

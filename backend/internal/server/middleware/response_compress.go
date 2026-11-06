@@ -4,12 +4,16 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/compresslevel"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -48,6 +52,21 @@ const (
 	compressStatePassthrough
 )
 
+// 压缩失败的观测分类：phase 标明失败发生在写出链的哪个环节；
+// error_kind 区分下游断连、下游超时与真正的压缩器错误。
+const (
+	compressPhaseInit  = "init"
+	compressPhaseWrite = "write"
+	compressPhaseFlush = "flush"
+	compressPhaseClose = "close"
+
+	compressErrorKindClientDisconnect  = "client_disconnect"
+	compressErrorKindDownstreamTimeout = "downstream_timeout"
+	compressErrorKindCodec             = "codec_error"
+
+	compressDirectionDownstreamEgress = "downstream_egress"
+)
+
 // compressResponseWriter 是按需压缩响应体的 gin.ResponseWriter 包装器：
 // 嵌入 gin.ResponseWriter 以保留 Status/Size/Written/Hijack/CloseNotify/Pusher
 // 等原有能力，仅覆写与 body 写出相关的方法，在首次写出 body 时惰性启用压缩。
@@ -67,6 +86,10 @@ type compressResponseWriter struct {
 	// 而 failover 等逻辑依赖 c.Writer.Size()/Written() 判断是否已写出数据，
 	// 因此激活时以明文计数为准，保持与未压缩路径一致的单调语义。
 	plainSize int
+	// failureLogged 标记本请求已记录过压缩/写出失败。下游断连会让
+	// Write、Flush、Close 连续返回同一个错误，首条日志已足够定位问题，
+	// 后续失败只更新 traffic 状态、不再重复打印，避免生产日志刷屏。
+	failureLogged bool
 }
 
 // 编译期断言：包装器仍是完整的 gin.ResponseWriter。
@@ -242,6 +265,7 @@ func (w *compressResponseWriter) Write(data []byte) (int, error) {
 		if err != nil {
 			w.traffic.FailOriginal()
 			w.traffic.FailActual()
+			w.recordCompressFailure(compressPhaseWrite, "write response compressor", err)
 		}
 		return n, err
 	}
@@ -262,6 +286,7 @@ func (w *compressResponseWriter) WriteString(data string) (int, error) {
 		if err != nil {
 			w.traffic.FailOriginal()
 			w.traffic.FailActual()
+			w.recordCompressFailure(compressPhaseWrite, "write response compressor", err)
 		}
 		return n, err
 	}
@@ -313,7 +338,7 @@ func (w *compressResponseWriter) Flush() {
 		if err := w.compressor.Flush(); err != nil {
 			w.traffic.FailActual()
 			w.traffic.FailOriginal()
-			logCompressError(w.ctx, "flush response compressor", w.encoding, err)
+			w.recordCompressFailure(compressPhaseFlush, "flush response compressor", err)
 		}
 	}
 	w.ResponseWriter.Flush()
@@ -368,7 +393,9 @@ func (w *compressResponseWriter) initCompressor() {
 	}
 	compressor, err := newCompressorWithLevels(w.ResponseWriter, w.encoding, w.levels)
 	if err != nil {
-		logCompressError(w.ctx, "create response compressor", w.encoding, err)
+		// 压缩器初始化失败是真正的服务端错误，始终以 Warn 记录，
+		// 不参与下游断连的降级与去重。
+		logCompressError(w.ctx, "create response compressor", w.encoding, compressPhaseInit, err)
 		return
 	}
 	header.Set("Content-Encoding", w.encoding)
@@ -392,10 +419,21 @@ func (w *compressResponseWriter) close() {
 	if err != nil {
 		w.traffic.FailActual()
 		w.traffic.FailOriginal()
-		logCompressError(w.ctx, "close response compressor", w.encoding, err)
+		w.recordCompressFailure(compressPhaseClose, "close response compressor", err)
 	} else {
 		w.traffic.CompleteOriginal()
 	}
+}
+
+// recordCompressFailure 记录本请求首条压缩/写出失败；后续因同一断连
+// 连续失败的 Write/Flush/Close 不再重复打印，但调用方仍需保留错误返回
+// 与 traffic 失败标记，二者语义不受日志去重影响。
+func (w *compressResponseWriter) recordCompressFailure(phase, message string, err error) {
+	if err == nil || w.failureLogged {
+		return
+	}
+	w.failureLogged = true
+	logCompressError(w.ctx, message, w.encoding, phase, err)
 }
 
 // newCompressorWithLevels 按编码和请求快照创建压缩器。deflate 按
@@ -442,10 +480,68 @@ func appendVaryAcceptEncoding(header http.Header) {
 }
 
 // logCompressError 记录压缩过程中的非致命错误，不影响响应继续写出。
-func logCompressError(ctx context.Context, message, encoding string, err error) {
-	logger.FromContext(ctx).Warn(message,
+// 下游断连（EPIPE/ECONNRESET/连接已关闭/请求 ctx 已取消）归因为
+// client_disconnect 并以 Info 记录：客户端提前断开并不代表服务端压缩故障，
+// 但运维仍应能看到该事件及 encoding、phase、底层 error。下游超时与真正的
+// 压缩器错误保持 Warn。函数本身从不静音错误，按请求去重由调用方控制。
+func logCompressError(ctx context.Context, message, encoding, phase string, err error) {
+	kind := classifyCompressError(ctx, err)
+	if phase == compressPhaseInit {
+		// 压缩器初始化失败没有下游写出环节，不可能是客户端断连；
+		// 即使 WithWriteTimeout 等外层已取消请求 ctx，也必须按真正的
+		// codec 错误以 Warn 记录，不能被 ctx 取消兜底分支降级为 Info。
+		kind = compressErrorKindCodec
+	}
+	fields := []zap.Field{
 		zap.String("component", "http.response_compress"),
 		zap.String("encoding", encoding),
+		zap.String("phase", phase),
+		zap.String("error_kind", kind),
+		// 保留底层错误与 request context 上的请求级字段（如 request_id），
+		// 便于把单条压缩日志关联回具体请求。
 		zap.Error(err),
-	)
+	}
+	if kind != compressErrorKindCodec {
+		fields = append(fields, zap.String("direction", compressDirectionDownstreamEgress))
+	}
+	log := logger.FromContext(ctx)
+	if kind == compressErrorKindClientDisconnect {
+		log.Info(message, fields...)
+		return
+	}
+	log.Warn(message, fields...)
+}
+
+// classifyCompressError 区分下游断连、下游超时与真正的压缩器错误。
+// 只有明确的下游失效才降级为 Info/超时分类，未知错误一律按 codec_error
+// 保留 Warn，避免把压缩器内部故障误判成客户端断开而静音。
+func classifyCompressError(ctx context.Context, err error) string {
+	switch {
+	case errors.Is(err, syscall.EPIPE),
+		errors.Is(err, syscall.ECONNRESET),
+		errors.Is(err, net.ErrClosed),
+		errors.Is(err, io.ErrClosedPipe),
+		errors.Is(err, context.Canceled):
+		return compressErrorKindClientDisconnect
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded):
+		return compressErrorKindDownstreamTimeout
+	}
+	// 先看错误自身的超时属性：WithWriteTimeout.writeTimeoutWriter.fail 在
+	// 写超时后会 cancel 请求 ctx，此时 ctx.Canceled 是超时的副作用而非
+	// 客户端主动断开。该检查必须位于 ctx 取消兜底之前，否则真实写超时
+	// 会被误报为 client_disconnect。
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return compressErrorKindDownstreamTimeout
+	}
+	if ctx != nil {
+		switch {
+		case errors.Is(ctx.Err(), context.Canceled):
+			// 底层错误可能已被压缩器重新包装，请求 ctx 已取消仍可确认是下游断开。
+			return compressErrorKindClientDisconnect
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			return compressErrorKindDownstreamTimeout
+		}
+	}
+	return compressErrorKindCodec
 }

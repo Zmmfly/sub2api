@@ -181,20 +181,23 @@ func TestExecuteRefreshesSharedCodingForEveryAccountRequest(t *testing.T) {
 	require.Equal(t, sharedAlgorithmTTL, server.TTL(sharedAlgorithmKey(accountID)))
 }
 
-func TestExecuteInitialHealthFailuresDoNotMultiplyTrafficOrPinIdentity(t *testing.T) {
-	for _, status := range []int{400, 403, 500, 502, 503, 504} {
+func TestExecuteInitialFailuresOnlyMultiplyFor400And422(t *testing.T) {
+	for _, status := range []int{400, 422, 403, 500, 502, 503, 504} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			registry := NewRegistry()
 			registry.Sync(814, true, time.Time{})
-			attempts := 0
+			var attempts []string
 			resp, err := registry.Execute(814, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
-				attempts++
-				require.Equal(t, "br", req.Header.Get("Content-Encoding"))
+				attempts = append(attempts, req.Header.Get("Content-Encoding"))
 				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(`{"error":"temporary failure"}`))}, nil
 			})
 			require.NoError(t, err)
 			require.NoError(t, resp.Body.Close())
-			require.Equal(t, 1, attempts)
+			expected := []string{"br"}
+			if status == 400 || status == 422 {
+				expected = []string{"br", "zstd", "deflate", ""}
+			}
+			require.Equal(t, expected, attempts)
 			resp, err = registry.Execute(814, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
 				require.Equal(t, "br", req.Header.Get("Content-Encoding"))
 				return okResponse("recovered"), nil

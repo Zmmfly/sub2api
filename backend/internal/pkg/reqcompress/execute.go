@@ -146,17 +146,16 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 				logPreservedCoding(req, accountID, algorithm, negotiation, resp, failureKind, nil)
 				return resp, nil
 			}
-			if !shouldProbeAfterAmbiguousRequestFailure(resp, failureKind) {
-				// A business/auth/rate/health error also proves nothing during
-				// the initial trial. Do not upload the body four times or pin
+			if !shouldProbeAfterInitialClientError(resp, failureKind) {
+				// An auth/rate/health error also proves nothing during the
+				// initial trial. Do not upload the body four times or pin
 				// identity just because the provider is temporarily unhealthy.
 				negotiation.abortNegotiation()
 				adoptDeliveredAttempt(req, probe)
 				return resp, nil
 			}
-			// Some providers use this specific diagnostic when they cannot
-			// decode a compressed body. Try other codings only in an unverified
-			// trial, without permanently removing this ambiguous candidate.
+			// A 400/422 may be coding-sensitive. Try every coding only in an
+			// unverified trial, without permanently removing this candidate.
 			unverifiedCandidates = true
 			fields := append(requestLogFields(req, accountID, algorithm, resp),
 				"reason", failureKind, "error_source", "upstream_response")

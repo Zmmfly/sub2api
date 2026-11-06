@@ -5,6 +5,7 @@ import (
 	"compress/zlib"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -310,32 +311,65 @@ func TestExecuteProbesIdentityAfterInitialGenericCodexBadRequest(t *testing.T) {
 	require.Equal(t, AlgorithmBrotli, registry.SettledAlgorithm(context.Background(), 130))
 }
 
-func TestExecuteKeepsTrialOnOrdinaryBusinessFailure(t *testing.T) {
+func TestExecuteProbesAllCodingsOnInitialOrdinaryClientError(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnprocessableEntity} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			body := testBody()
+			registry := NewRegistry()
+			registry.Sync(13, true, time.Time{})
+
+			var sent []string
+			send := func(req *http.Request) (*http.Response, error) {
+				sent = append(sent, req.Header.Get("Content-Encoding"))
+				return &http.Response{
+					StatusCode: status,
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"messages: invalid role"}}`)),
+				}, nil
+			}
+			resp, err := registry.Execute(13, newTestRequest(t, body), send)
+			require.NoError(t, err)
+			require.Equal(t, status, resp.StatusCode)
+			require.Equal(t, "messages: invalid role", errorMessage(t, resp.Body))
+			require.Equal(t, []string{"br", "zstd", "deflate", ""}, sent)
+
+			// A failed identity attempt does not pin identity or poison the
+			// candidates. The next request can perform a complete trial again.
+			sent = nil
+			resp, err = registry.Execute(13, newTestRequest(t, body), send)
+			require.NoError(t, err)
+			require.Equal(t, status, resp.StatusCode)
+			require.Equal(t, []string{"br", "zstd", "deflate", ""}, sent)
+		})
+	}
+}
+
+func TestExecuteInitialOrdinaryClientErrorIdentitySuccessUsesTemporaryIdentity(t *testing.T) {
 	body := testBody()
 	registry := NewRegistry()
-	registry.Sync(13, true, time.Time{})
+	registry.Sync(131, true, time.Time{})
 
 	var sent []string
 	send := func(req *http.Request) (*http.Response, error) {
-		sent = append(sent, req.Header.Get("Content-Encoding"))
+		encoding := req.Header.Get("Content-Encoding")
+		sent = append(sent, encoding)
+		if encoding == "" {
+			return okResponse("identity"), nil
+		}
 		return &http.Response{
 			StatusCode: http.StatusBadRequest,
 			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"messages: invalid role"}}`)),
 		}, nil
 	}
-	resp, err := registry.Execute(13, newTestRequest(t, body), send)
+	resp, err := registry.Execute(131, newTestRequest(t, body), send)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.Equal(t, "messages: invalid role", errorMessage(t, resp.Body))
-	require.Equal(t, []string{"br"}, sent)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, []string{"br", "zstd", "deflate", ""}, sent)
 
-	// A business failure is not a coding rejection. Do not amplify one request
-	// into four uploads, or poison capability negotiation for later requests.
 	sent = nil
-	resp, err = registry.Execute(13, newTestRequest(t, body), send)
+	resp, err = registry.Execute(131, newTestRequest(t, body), send)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.Equal(t, []string{"br"}, sent)
+	require.Equal(t, "identity", readAll(t, resp.Body))
+	require.Equal(t, []string{""}, sent)
 }
 
 func TestExecuteDoesNotFallbackOnRateLimit(t *testing.T) {

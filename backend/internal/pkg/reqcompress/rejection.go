@@ -37,14 +37,14 @@ var rejectionKeywords = []string{
 	"invalid_encoding",
 }
 
-// Only specific ambiguous 400/422 diagnostics can guide an unverified trial
-// without explicit coding evidence. Business errors and upstream outages never
-// justify multiplying uploads or discarding a coding candidate.
-func shouldProbeAfterAmbiguousRequestFailure(resp *http.Response, kind string) bool {
+// Any 400/422 can guide an unverified initial trial through every coding and
+// one identity attempt. Other statuses may fail before the upstream decoded the
+// entity, so they return immediately without multiplying uploads.
+func shouldProbeAfterInitialClientError(resp *http.Response, kind string) bool {
 	if resp == nil || (resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusUnprocessableEntity) {
 		return false
 	}
-	return kind == responseFailureBodyRead || kind == responseFailureGenericBadRequest
+	return kind == responseFailureHTTP || kind == responseFailureBodyRead || kind == responseFailureGenericBadRequest
 }
 
 const (

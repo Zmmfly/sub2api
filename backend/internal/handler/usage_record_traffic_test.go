@@ -161,7 +161,8 @@ func TestUsageRecordTraffic_AsyncImageDoesNotReuseSubmissionCollector(t *testing
 	router.Use(middleware.TrafficCapture(), middleware.ResponseCompress())
 	router.POST("/images/async", func(c *gin.Context) {
 		traffic.AfterFinalize(c.Request.Context(), func(snapshot *traffic.Usage) { submissionTraffic <- snapshot })
-		job, _, cancel := newAsyncImageContext(c, []byte(`{"prompt":"image"}`), time.Minute)
+		job, _, cancel, err := newAsyncImageContext(c, []byte(`{"prompt":"image"}`), time.Minute)
+		require.NoError(t, err)
 		stopJob = cancel
 		go func() {
 			<-allowJob // deterministically start only after the submission's 202 finalized

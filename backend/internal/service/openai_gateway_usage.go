@@ -151,6 +151,35 @@ func groupBillsOpenAIFastAtStandard(apiKey *APIKey, account *Account, serviceTie
 	}
 }
 
+// OpenAIUsageLogRequestID returns the usage_logs.request_id RecordUsage stores
+// for result when called with ctx. Callers that correlate another record with
+// that row (the client WebSocket turn's traffic event) use it. Without any
+// request ID in result or ctx the fallback is generated per call.
+func OpenAIUsageLogRequestID(ctx context.Context, result *OpenAIForwardResult) string {
+	if result == nil {
+		return resolveUsageBillingRequestID(ctx, "")
+	}
+	requestID := resolveUsageBillingRequestID(ctx, result.RequestID)
+	if result.OpenAIWSMode {
+		if upstreamRequestID := strings.TrimSpace(result.RequestID); upstreamRequestID != "" {
+			requestID = upstreamRequestID
+		}
+	}
+	// Async Grok video: always use the stable task id for dedup (status + content polls
+	// share one bill). Context-local client/local IDs would otherwise create a new row
+	// per poll if Redis claim is lost.
+	if result.VideoCount > 0 {
+		if stable := StableGrokVideoBillingRequestID(firstNonEmpty(
+			strings.TrimPrefix(strings.TrimSpace(result.RequestID), "grok-video:"),
+			strings.TrimSpace(result.ResponseID),
+			strings.TrimPrefix(strings.TrimSpace(requestID), "grok-video:"),
+		)); stable != "" {
+			requestID = stable
+		}
+	}
+	return requestID
+}
+
 // RecordUsage records usage and deducts balance
 func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRecordUsageInput) error {
 	if input == nil {
@@ -338,24 +367,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	// Create usage log
 	durationMs := int(result.Duration.Milliseconds())
 	accountRateMultiplier := account.BillingRateMultiplier()
-	requestID := resolveUsageBillingRequestID(ctx, result.RequestID)
-	if result.OpenAIWSMode {
-		if upstreamRequestID := strings.TrimSpace(result.RequestID); upstreamRequestID != "" {
-			requestID = upstreamRequestID
-		}
-	}
-	// Async Grok video: always use the stable task id for dedup (status + content polls
-	// share one bill). Context-local client/local IDs would otherwise create a new row
-	// per poll if Redis claim is lost.
-	if result.VideoCount > 0 {
-		if stable := StableGrokVideoBillingRequestID(firstNonEmpty(
-			strings.TrimPrefix(strings.TrimSpace(result.RequestID), "grok-video:"),
-			strings.TrimSpace(result.ResponseID),
-			strings.TrimPrefix(strings.TrimSpace(requestID), "grok-video:"),
-		)); stable != "" {
-			requestID = stable
-		}
-	}
+	requestID := OpenAIUsageLogRequestID(ctx, result)
 
 	// 确定 RequestedModel（渠道映射前的原始模型）
 	requestedModel := result.Model

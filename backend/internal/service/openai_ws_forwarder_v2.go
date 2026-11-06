@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/traffic"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -36,14 +35,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	lastFailureReason string,
 	agentTaskRecoveryTried *bool,
 ) (*OpenAIForwardResult, error) {
-	// This HTTP request may fall back to HTTP after a WebSocket attempt.
-	// Its full upstream traffic is no longer an HTTP-entity measurement, even
-	// when that later attempt succeeds; preserve only the HTTP downstream.
-	collector := traffic.FromContext(ctx)
-	if collector == nil && c != nil && c.Request != nil {
-		collector = traffic.FromContext(c.Request.Context())
-	}
-	collector.ExcludeUpstream()
+	// The leased turn records its own upstream WebSocket traffic below. Like
+	// HTTP retries, a later HTTP fallback adds its attempts to the same request.
+	collector := openAIWSTrafficCollector(ctx, c)
 	if s == nil || account == nil {
 		return nil, wrapOpenAIWSFallback("invalid_state", errors.New("service or account is nil"))
 	}
@@ -275,6 +269,8 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		}
 		lease.Release()
 	}()
+	// Attribute only this lease's bytes; MarkBroken/Release publish them.
+	lease.beginTraffic(collector)
 	connID := strings.TrimSpace(lease.ConnID())
 	logOpenAIWSModeDebug(
 		"connected account_id=%d account_type=%s transport=%s conn_id=%s conn_reused=%v conn_idle_ms=%d conn_age_ms=%d upstream_pings=%d conn_pick_ms=%d queue_wait_ms=%d has_previous_response_id=%v",

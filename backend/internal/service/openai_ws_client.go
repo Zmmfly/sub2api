@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,7 +15,6 @@ import (
 
 	openaiwsv2 "github.com/Wei-Shaw/sub2api/internal/service/openai_ws_v2"
 	coderws "github.com/coder/websocket"
-	"github.com/coder/websocket/wsjson"
 )
 
 const openAIWSMessageReadLimitBytes int64 = 16 * 1024 * 1024
@@ -132,13 +132,18 @@ func (d *coderOpenAIWSClientDialer) Dial(
 			return true
 		},
 	}
+	var baseClient *http.Client
 	if proxy := strings.TrimSpace(proxyURL); proxy != "" {
 		proxyClient, err := d.proxyHTTPClient(proxy)
 		if err != nil {
 			return nil, 0, nil, err
 		}
-		opts.HTTPClient = proxyClient
+		baseClient = proxyClient
 	}
+	// The per-dial client only wraps the upgraded connection for traffic
+	// accounting; dialing, proxying and connection reuse stay with baseClient.
+	var wireTransport *openAIWSWireCountingTransport
+	opts.HTTPClient, wireTransport = newOpenAIWSWireCountingClient(baseClient)
 
 	conn, resp, err := coderws.Dial(ctx, targetURL, opts)
 	if err != nil {
@@ -161,7 +166,9 @@ func (d *coderOpenAIWSClientDialer) Dial(
 	respHeaders := http.Header(nil)
 	if resp != nil {
 		respHeaders = cloneHeader(resp.Header)
+		wrapped.traffic.compressed = openAIWSPermessageDeflateNegotiated(resp.Header)
 	}
+	wrapped.traffic.wire = wireTransport.upgraded()
 	wrapped.conn = conn
 	return wrapped, 0, respHeaders, nil
 }
@@ -291,6 +298,20 @@ func (d *coderOpenAIWSClientDialer) SnapshotTransportMetrics() OpenAIWSTransport
 type coderOpenAIWSClientConn struct {
 	conn          *coderws.Conn
 	upstreamPings atomic.Int64
+	traffic       openAIWSTrafficStats
+}
+
+var _ openAIWSTrafficMeter = (*coderOpenAIWSClientConn)(nil)
+
+func (c *coderOpenAIWSClientConn) TrafficCounters() (openAIWSTrafficCounters, bool) {
+	if c == nil {
+		return openAIWSTrafficCounters{}, false
+	}
+	return c.traffic.TrafficCounters()
+}
+
+func (c *coderOpenAIWSClientConn) TrafficCompressed() bool {
+	return c != nil && c.traffic.TrafficCompressed()
 }
 
 func (c *coderOpenAIWSClientConn) UpstreamPingCount() int64 {
@@ -309,8 +330,25 @@ func (c *coderOpenAIWSClientConn) WriteJSON(ctx context.Context, value any) erro
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return wsjson.Write(ctx, c.conn, value)
+	// Same encoding and error wrapping as wsjson.Write, which hands the whole
+	// encoded document (including json.Encoder's newline) to one Conn.Write.
+	// Counting here keeps the original message size without a second marshal.
+	if err := json.NewEncoder(openAIWSWriterFunc(func(p []byte) (int, error) {
+		err := c.conn.Write(ctx, coderws.MessageText, p)
+		c.traffic.observeWrite(len(p), err)
+		if err != nil {
+			return 0, err
+		}
+		return len(p), nil
+	})).Encode(value); err != nil {
+		return fmt.Errorf("failed to write JSON message: %w", fmt.Errorf("failed to marshal JSON: %w", err))
+	}
+	return nil
 }
+
+type openAIWSWriterFunc func([]byte) (int, error)
+
+func (f openAIWSWriterFunc) Write(p []byte) (int, error) { return f(p) }
 
 func (c *coderOpenAIWSClientConn) ReadMessage(ctx context.Context) ([]byte, error) {
 	if c == nil || c.conn == nil {
@@ -324,6 +362,7 @@ func (c *coderOpenAIWSClientConn) ReadMessage(ctx context.Context) ([]byte, erro
 	if err != nil {
 		return nil, err
 	}
+	c.traffic.observeRead(len(payload))
 	switch msgType {
 	case coderws.MessageText, coderws.MessageBinary:
 		return payload, nil
@@ -343,6 +382,7 @@ func (c *coderOpenAIWSClientConn) ReadFrame(ctx context.Context) (coderws.Messag
 	if err != nil {
 		return coderws.MessageText, nil, err
 	}
+	c.traffic.observeRead(len(payload))
 	return msgType, payload, nil
 }
 
@@ -353,7 +393,9 @@ func (c *coderOpenAIWSClientConn) WriteFrame(ctx context.Context, msgType coderw
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return c.conn.Write(ctx, msgType, payload)
+	err := c.conn.Write(ctx, msgType, payload)
+	c.traffic.observeWrite(len(payload), err)
+	return err
 }
 
 func (c *coderOpenAIWSClientConn) Ping(ctx context.Context) error {

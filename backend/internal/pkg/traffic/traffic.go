@@ -1,5 +1,8 @@
-// Package traffic measures HTTP entity bodies, excluding HTTP headers, framing,
-// TLS, and WebSocket messages. A nil count is unknown, not an empty body.
+// Package traffic measures HTTP entity bodies and instrumented WebSocket
+// turns, excluding HTTP/TCP/TLS headers and framing. WebSocket observations use
+// application message payloads (original) and data-frame payloads (actual), not
+// frame headers, masking keys or control frames. A nil count is unknown, not an
+// empty body.
 package traffic
 
 import (
@@ -191,8 +194,28 @@ func (c *Collector) Exclude() {
 	}
 }
 
-// ExcludeUpstream marks requests that attempt a non-HTTP upstream (WebSocket).
-// It is sticky across subsequent HTTP fallbacks, but preserves HTTP downstream.
+// Record publishes one already completed observation, such as the WebSocket
+// messages exchanged by a single upstream turn. A nil count stays unknown; it
+// is never replaced by zero. Like Begin, it has no effect after Finalize.
+func (c *Collector) Record(direction Direction, original, actual *int64, compressed bool) {
+	counter := c.Begin(direction, compressed)
+	if counter == nil {
+		return
+	}
+	if original != nil {
+		counter.SetOriginal(*original)
+	}
+	if actual != nil {
+		counter.AddActual(int(*actual))
+		counter.CompleteActual()
+	}
+}
+
+// ExcludeUpstream marks requests that attempt an upstream transport that is
+// not instrumented (for example an unmetered WebSocket implementation or a
+// 101 upgrade through the HTTP transport). It is sticky across subsequent HTTP
+// fallbacks, so a partial sum is never presented as complete, but preserves
+// HTTP downstream.
 func (c *Collector) ExcludeUpstream() {
 	if c != nil {
 		c.mu.Lock()

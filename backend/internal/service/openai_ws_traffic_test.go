@@ -11,7 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestOpenAIWSAttemptExcludesUpstreamAcrossHTTPFallback(t *testing.T) {
+// A WS attempt that ends before any upstream message (here: invalid state)
+// exchanged nothing, so later HTTP attempts are the complete upstream sum.
+func TestOpenAIWSAttemptWithoutMessagesKeepsHTTPFallbackUpstream(t *testing.T) {
 	for _, collectorInCallContext := range []bool{false, true} {
 		collector := traffic.NewCollector()
 		requestContext := traffic.WithCollector(context.Background(), collector)
@@ -28,8 +30,7 @@ func TestOpenAIWSAttemptExcludesUpstreamAcrossHTTPFallback(t *testing.T) {
 		downstream.CompleteOriginal()
 		var service *OpenAIGatewayService
 		_, err := service.forwardOpenAIWSV2(ctx, c, nil, nil, "", "", "", OpenAIWSProtocolDecision{}, false, false, "", "", time.Now(), 0, "", nil)
-		require.Error(t, err) // invalid-state fallback still crossed the WS boundary
-		// A successful later HTTP attempt cannot restore a partial upstream sum.
+		require.Error(t, err)
 		for _, direction := range []traffic.Direction{traffic.UpstreamRequest, traffic.UpstreamResponse} {
 			body := collector.Begin(direction, false)
 			body.AddActual(13)
@@ -39,7 +40,9 @@ func TestOpenAIWSAttemptExcludesUpstreamAcrossHTTPFallback(t *testing.T) {
 		}
 		collector.Finalize()
 		usage := collector.Snapshot()
-		require.Nil(t, usage.Upstream)
+		require.NotNil(t, usage.Upstream)
+		require.EqualValues(t, 13, *usage.Upstream.Request.ActualBytes)
+		require.EqualValues(t, 13, *usage.Upstream.Response.OriginalBytes)
 		require.EqualValues(t, 7, *usage.Downstream.Response.ActualBytes)
 	}
 }

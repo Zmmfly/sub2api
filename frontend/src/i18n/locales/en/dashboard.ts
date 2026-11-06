@@ -343,7 +343,7 @@ export default {
       clientDownload: 'Client download',
       original: 'Original',
       compressionRate: 'Compression rate',
-      bodyOnlyHint: 'Actual HTTP body bytes, excluding HTTP headers and TCP/TLS overhead. Compression rate = (1 − actual / original) × 100%; negative values indicate expansion. Unknown or unrecorded values are shown as —.',
+      bodyOnlyHint: 'Actual HTTP body bytes; for WebSocket turns, the data-frame payload bytes of the turn\'s messages. Excludes HTTP headers, WebSocket frame headers and control frames, and TCP/TLS overhead. Compression rate = (1 − actual / original) × 100%; negative values indicate expansion. Unknown or unrecorded values are shown as —.',
     },
     costDetails: 'Cost Breakdown',
     tokenDetails: 'Token Breakdown',

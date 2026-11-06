@@ -1,10 +1,12 @@
 package service
 
-// OpsTrafficSummary covers finalized gateway HTTP requests in the independent
-// traffic ledger, including failures and all their upstream retry attempts.
-// It is independent of usage/error logging. HTTP/TCP/TLS headers and WebSocket
-// frames are outside this metric. RequestCount is the ledger's own population,
-// not the overview's usage/error-derived request count.
+// OpsTrafficSummary covers finalized gateway HTTP requests and client
+// WebSocket turns in the independent traffic ledger, including failures and
+// all their upstream retry attempts. It is independent of usage/error logging.
+// HTTP/TCP/TLS headers and WebSocket frame headers and control frames are
+// outside this metric. RequestCount is the ledger's own population, not the
+// overview's usage/error-derived request count. Source keeps the value
+// "http_requests" for API compatibility.
 type OpsTrafficSummary struct {
 	Source       string         `json:"source"`
 	RequestCount int64          `json:"request_count"`
@@ -15,9 +17,10 @@ type OpsTrafficSummary struct {
 }
 
 // OpsTrafficLink adds request and response body observations for one side.
-// Every HTTP request contributes two potential samples, so each coverage
-// denominator is 2 * RequestCount. Byte sums are nil when no sample is known;
-// measured empty bodies are zero. Original and actual coverage may differ.
+// Every ledger request (HTTP request or client WebSocket turn) contributes two
+// potential samples, so each coverage denominator is 2 * RequestCount. Byte
+// sums are nil when no sample is known; measured empty bodies are zero.
+// Original and actual coverage may differ.
 // CompressionPercent uses ONLY paired observations with both byte values known,
 // never the independently covered OriginalBytes / ActualBytes sums. It is nil
 // for a non-positive paired original sum, and can legitimately be negative.

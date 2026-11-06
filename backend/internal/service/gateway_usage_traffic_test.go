@@ -202,6 +202,7 @@ func TestWriteUsageTraffic_PartialFailedAttemptRemainsUnknown(t *testing.T) {
 	require.Nil(t, repo.lastLog.Traffic.Upstream.Response.ActualBytes, "do not silently count only the successful retry")
 }
 
+// docs/TRAFFIC_STATS.md: uninstrumented WebSocket/Live callers stay unknown.
 func TestWriteUsageTraffic_WebSocketTurnsStayUnknownAndImmediate(t *testing.T) {
 	collector := traffic.NewCollector()
 	completeUsageTrafficBody(collector, traffic.DownstreamResponse, 123, 123, false)
@@ -224,20 +225,30 @@ func TestWriteUsageTraffic_WebSocketTurnsStayUnknownAndImmediate(t *testing.T) {
 	require.Equal(t, 4, repo.calls, "finalize must not duplicate per-turn records")
 }
 
-func TestWriteUsageTraffic_HTTPIngressUpstreamWSKeepsDownstream(t *testing.T) {
+// Covers the mixed HTTP/WS attempt contract in docs/TRAFFIC_STATS.md.
+func TestWriteUsageTraffic_HTTPIngressUpstreamWSKeepsBothSides(t *testing.T) {
 	collector := traffic.NewCollector()
 	completeUsageTrafficBody(collector, traffic.DownstreamRequest, 100, 100, false)
 	completeUsageTrafficBody(collector, traffic.DownstreamResponse, 200, 60, true)
-	// Even if a prior HTTP attempt was measured, a final WS response has no
-	// complete upstream HTTP entity-body representation for this request.
+	// A measured HTTP attempt plus the leased WS turn (messages vs. deflated
+	// frame payloads) sum like HTTP retries.
 	completeUsageTrafficBody(collector, traffic.UpstreamRequest, 80, 80, false)
+	wsRequestOriginal, wsRequestActual := int64(300), int64(90)
+	wsResponseOriginal, wsResponseActual := int64(1000), int64(250)
+	collector.Record(traffic.UpstreamRequest, &wsRequestOriginal, &wsRequestActual, true)
+	collector.Record(traffic.UpstreamResponse, &wsResponseOriginal, &wsResponseActual, true)
 	repo := &openAIRecordUsageLogRepoStub{}
 	writeUsageLogBestEffort(traffic.WithCollector(context.Background(), collector), repo, &UsageLog{OpenAIWSMode: true}, "test")
 	require.Zero(t, repo.calls)
 	collector.Finalize()
 	require.Equal(t, 1, repo.calls)
 	require.NotNil(t, repo.lastLog.Traffic)
-	require.Nil(t, repo.lastLog.Traffic.Upstream)
+	require.NotNil(t, repo.lastLog.Traffic.Upstream)
+	require.EqualValues(t, 380, *repo.lastLog.Traffic.Upstream.Request.OriginalBytes)
+	require.EqualValues(t, 170, *repo.lastLog.Traffic.Upstream.Request.ActualBytes)
+	require.True(t, repo.lastLog.Traffic.Upstream.Request.Compressed)
+	require.EqualValues(t, 1000, *repo.lastLog.Traffic.Upstream.Response.OriginalBytes)
+	require.EqualValues(t, 250, *repo.lastLog.Traffic.Upstream.Response.ActualBytes)
 	require.EqualValues(t, 100, *repo.lastLog.Traffic.Downstream.Request.ActualBytes)
 	require.EqualValues(t, 60, *repo.lastLog.Traffic.Downstream.Response.ActualBytes)
 }

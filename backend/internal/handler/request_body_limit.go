@@ -12,13 +12,17 @@ import (
 )
 
 // handleRequestBodyReadError handles cancellation and temporary capacity errors
-// before callers classify malformed or oversized request bodies.
+// and stalled uploads (408) before callers classify malformed or oversized
+// request bodies. Failure logging happens once in the shared reader (httputil).
 func handleRequestBodyReadError(c *gin.Context, err error) bool {
 	if err != nil && failoverClientGone(c) {
 		c.Abort()
 		return true
 	}
-	return middleware2.RejectRequestBodyMemoryOverload(c, err)
+	if middleware2.RejectRequestBodyMemoryOverload(c, err) {
+		return true
+	}
+	return middleware2.RejectRequestBodyReadTimeout(c, err)
 }
 
 func extractMaxBytesError(err error) (*http.MaxBytesError, bool) {

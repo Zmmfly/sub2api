@@ -5,8 +5,6 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"context"
-	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -86,7 +84,17 @@ func (b *requestBodyBuffer) release(ctx context.Context) {
 	releaseRequestBodyMemory(ctx, charged)
 }
 
+// readRequestBodyWithBudget is the shared ingress entry point; it logs each
+// failure exactly once (see logRequestBodyReadFailure).
 func readRequestBodyWithBudget(req *http.Request) (requestBodyBuffer, error) {
+	body, err := readRequestBodyUnlogged(req)
+	if err != nil {
+		logRequestBodyReadFailure(req, err)
+	}
+	return body, err
+}
+
+func readRequestBodyUnlogged(req *http.Request) (requestBodyBuffer, error) {
 	if req == nil || req.Body == nil {
 		return requestBodyBuffer{}, nil
 	}
@@ -123,7 +131,7 @@ func readRequestBodyWithBudget(req *http.Request) (requestBodyBuffer, error) {
 	decoded, err := decompressRequestBodyWithBudget(req.Context(), enc, raw.data)
 	if err != nil {
 		traffic.RequestCounter(req.Context()).FailOriginal()
-		return requestBodyBuffer{}, fmt.Errorf("decode Content-Encoding %q: %w", enc, err)
+		return requestBodyBuffer{}, &ContentEncodingError{Encoding: enc, Err: err}
 	}
 	// This is the exact completed decoder output, before model rewrites,
 	// normalization, preread replay, or protocol conversion (not final JSON size).
@@ -217,6 +225,9 @@ func ReadLenientJSONRequestBodyWithPrealloc(req *http.Request, maxNormalizedByte
 		return nil, err
 	}
 	normalized, err := normalizeLenientJSONRequestBody(req.Context(), body.data, maxNormalizedBytes)
+	if err != nil {
+		logRequestBodyReadFailure(req, err)
+	}
 	if err != nil || normalized.charged > 0 {
 		body.release(req.Context())
 	}
@@ -262,7 +273,7 @@ func decompressRequestBodyWithBudget(ctx context.Context, encoding string, raw [
 	case "br":
 		reader = brotli.NewReader(bytes.NewReader(raw))
 	default:
-		return requestBodyBuffer{}, errors.New("unsupported Content-Encoding")
+		return requestBodyBuffer{}, ErrUnsupportedContentEncoding
 	}
 	decoded, err := readRequestBodyChunksWithBudget(ctx, io.LimitReader(reader, maxDecompressedBodySize+1), requestBodyReadInitCap, -1)
 	if err != nil {

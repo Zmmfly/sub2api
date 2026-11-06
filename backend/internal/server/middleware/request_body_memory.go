@@ -3,6 +3,7 @@ package middleware
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/gin-gonic/gin"
@@ -19,7 +20,37 @@ func RejectRequestBodyReadError(c *gin.Context, err error) bool {
 		c.Abort()
 		return true
 	}
-	return RejectRequestBodyMemoryOverload(c, err)
+	if RejectRequestBodyMemoryOverload(c, err) {
+		return true
+	}
+	return RejectRequestBodyReadTimeout(c, err)
+}
+
+// RejectRequestBodyReadTimeout maps a stalled upload (per-read socket deadline)
+// to 408 in the protocol's error shape, instead of the generic 400 used for
+// malformed bodies. It does not touch cancelled-client, size or capacity errors.
+func RejectRequestBodyReadTimeout(c *gin.Context, err error) bool {
+	if c == nil || !pkghttputil.IsRequestBodyReadTimeout(err) {
+		return false
+	}
+	const message = "Request body upload timed out"
+	path := ""
+	if c.Request != nil && c.Request.URL != nil {
+		path = c.Request.URL.Path
+	}
+	switch {
+	case strings.HasPrefix(path, "/v1beta") || strings.HasPrefix(path, "/antigravity/v1beta"):
+		GoogleErrorWriter(c, http.StatusRequestTimeout, message)
+	case strings.Contains(path, "/messages"):
+		c.JSON(http.StatusRequestTimeout, gin.H{
+			"type":  "error",
+			"error": gin.H{"type": "invalid_request_error", "message": message},
+		})
+	default:
+		c.JSON(http.StatusRequestTimeout, gin.H{"error": gin.H{"type": "invalid_request_error", "message": message}})
+	}
+	c.Abort()
+	return true
 }
 
 // RejectRequestBodyMemoryOverload keeps temporary capacity errors distinct

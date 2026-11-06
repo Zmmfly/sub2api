@@ -1208,7 +1208,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					AccountID:          account.ID,
 					AccountName:        account.Name,
 					UpstreamStatusCode: resp.StatusCode,
-					UpstreamRequestID:  resp.Header.Get("x-request-id"),
+					UpstreamRequestID:  openAIUpstreamRequestID(resp.Header),
 					Kind:               "failover",
 					Message:            upstreamMsg,
 					Detail:             upstreamDetail,
@@ -1275,7 +1275,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 							AccountID:          account.ID,
 							AccountName:        account.Name,
 							UpstreamStatusCode: compactResp.StatusCode,
-							UpstreamRequestID:  compactResp.Header.Get("x-request-id"),
+							UpstreamRequestID:  openAIUpstreamRequestID(compactResp.Header),
 							Kind:               "failover",
 							Message:            signal.message,
 						})

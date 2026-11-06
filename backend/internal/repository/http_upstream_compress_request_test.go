@@ -88,6 +88,42 @@ func TestUpstreamRequestCompressionNegotiatesAndMeasuresTraffic(t *testing.T) {
 	require.Greater(t, *usage.Upstream.Request.Ratio(), 0.0)
 }
 
+func TestUpstreamRequestCompressionGenericCodex400FallsBackToIdentity(t *testing.T) {
+	const accountID int64 = 990000003
+	original := []byte(`{"model":"gpt-6.1-sol","instructions":"` +
+		strings.Repeat("codex instructions ", 100) + `","input":"hi","stream":true}`)
+	require.Greater(t, len(original), int(reqcompress.MinCompressibleBodyBytes))
+
+	var attempts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		encoding := strings.ToLower(r.Header.Get("Content-Encoding"))
+		attempts = append(attempts, encoding)
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		if encoding != "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"detail":"Bad Request"}`))
+			return
+		}
+		require.Equal(t, original, body)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	reqcompress.SyncAccount(accountID, true, time.Time{})
+	t.Cleanup(func() { reqcompress.SyncAccount(accountID, false, time.Time{}) })
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL, bytes.NewReader(original))
+	require.NoError(t, err)
+
+	resp, err := doUpstreamRequestWithCompression(server.Client(), req, accountID)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	_, err = io.Copy(io.Discard, resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, []string{"br", "zstd", "deflate", ""}, attempts)
+}
+
 func TestUpstreamRequestCompressionDisabledForwardsIdentity(t *testing.T) {
 	const accountID int64 = 990000002
 	reqcompress.SyncAccount(accountID, false, time.Time{})

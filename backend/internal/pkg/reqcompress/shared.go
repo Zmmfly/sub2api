@@ -16,6 +16,7 @@ import (
 
 const (
 	sharedAlgorithmKeyPrefix = "reqcompress:account:"
+	sharedIdentityValue      = "identity"
 	sharedStateWriteTimeout  = 5 * time.Second
 	// sharedRefreshTimeout bounds the per-request TTL renewal. It is shorter
 	// than sharedStateWriteTimeout because refresh is best effort and runs on
@@ -61,6 +62,34 @@ return 0
 // probe and publish again.
 var persistSharedAlgorithmScript = redis.NewScript(`
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+redis.call('DEL', KEYS[2])
+return 1
+`)
+
+// readSharedAlgorithmScript reads a coding and its remaining lifetime
+// atomically, so a concurrent replacement cannot pair one value with another
+// value's TTL. Empty values are never valid negotiation results and represent
+// a missing key; PTTL -1 marks a legacy coding without an expiry.
+var readSharedAlgorithmScript = redis.NewScript(`
+local current = redis.call('GET', KEYS[1])
+if not current then
+    return {'', -2}
+end
+return {current, redis.call('PTTL', KEYS[1])}
+`)
+
+// persistSharedIdentityScript lets a proven coding win over a late identity
+// result and never extends an existing shared identity deadline. Only a fresh
+// negotiation after the old identity expired may create a new 30-minute value.
+var persistSharedIdentityScript = redis.NewScript(`
+local current = redis.call('GET', KEYS[1])
+if current == 'identity' then
+    return 2
+end
+if current then
+    return 0
+end
+redis.call('SET', KEYS[1], 'identity', 'PX', ARGV[1])
 redis.call('DEL', KEYS[2])
 return 1
 `)
@@ -148,6 +177,8 @@ func parseSharedAlgorithm(raw string) (Algorithm, bool) {
 	switch algorithm {
 	case AlgorithmBrotli, AlgorithmZstd, AlgorithmDeflate:
 		return algorithm, true
+	case sharedIdentityValue:
+		return AlgorithmNone, true
 	default:
 		return AlgorithmNone, false
 	}
@@ -173,14 +204,20 @@ func (r *Registry) hydrateShared(ctx context.Context, accountID int64, negotiati
 		return nil
 	}
 
-	raw, err := client.Get(ctx, sharedAlgorithmKey(accountID)).Result()
-	if errors.Is(err, redis.Nil) {
-		negotiation.sharedLoaded = true
-		return nil
-	}
+	result, err := readSharedAlgorithmScript.Run(ctx, client, []string{sharedAlgorithmKey(accountID)}).Result()
 	if err != nil {
 		return err
 	}
+	values, ok := result.([]any)
+	if !ok || len(values) != 2 {
+		return fmt.Errorf("invalid shared request compression snapshot %T", result)
+	}
+	raw, _ := values[0].(string)
+	if raw == "" {
+		negotiation.sharedLoaded = true
+		return nil
+	}
+	ttlMillis, _ := values[1].(int64)
 	algorithm, ok := parseSharedAlgorithm(raw)
 	if !ok {
 		return fmt.Errorf("invalid shared request compression algorithm %q", raw)
@@ -190,8 +227,55 @@ func (r *Registry) hydrateShared(ctx context.Context, accountID int64, negotiati
 	negotiation.current = algorithm
 	negotiation.tested = true
 	negotiation.negotiating = false
+	if algorithm == AlgorithmNone {
+		// Shared identity is only produced for ambiguous failures. Preserve all
+		// candidates and align this instance to the same Redis-backed deadline.
+		negotiation.remaining = append([]Algorithm(nil), TrialOrder...)
+		if ttlMillis > 0 {
+			negotiation.identityRetryAt = r.now().Add(time.Duration(ttlMillis) * time.Millisecond)
+		} else {
+			// Never accept a non-expiring identity result: re-probe immediately.
+			negotiation.identityRetryAt = r.now()
+		}
+		return nil
+	}
+	negotiation.identityRetryAt = time.Time{}
 	negotiation.remaining = keepFrom(TrialOrder, algorithm)
 	return nil
+}
+
+// persistSharedIdentity publishes the same 30-minute ambiguous-identity
+// deadline to every instance. It never slides on reads or requests; the key
+// expires naturally before candidates are retried.
+func (r *Registry) persistSharedIdentity(ctx context.Context, accountID int64, negotiation *state, retryAt time.Time) {
+	client := r.sharedRedis()
+	if client == nil || negotiation == nil {
+		return
+	}
+	slot := r.existingSlot(accountID)
+	if slot == nil {
+		return
+	}
+	slot.sharedMu.Lock()
+	defer slot.sharedMu.Unlock()
+	if slot.currentState() != negotiation {
+		return
+	}
+	currentRetryAt, ok := negotiation.identityRetry()
+	if !ok || !currentRetryAt.Equal(retryAt) {
+		return
+	}
+	ttl := retryAt.Sub(r.now())
+	if ttl <= 0 {
+		return
+	}
+	ctx, cancel := sharedWriteContext(ctx)
+	defer cancel()
+	if err := persistSharedIdentityScript.Run(ctx, client,
+		[]string{sharedAlgorithmKey(accountID), sharedInvalidationKey(accountID)},
+		ttl.Milliseconds()).Err(); err != nil {
+		slog.Warn("reqcompress shared identity store failed", "account_id", accountID, "error", err)
+	}
 }
 
 func sharedWriteContext(ctx context.Context) (context.Context, context.CancelFunc) {

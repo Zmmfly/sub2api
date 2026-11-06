@@ -136,6 +136,35 @@ func TestHandleErrorResponse_Deterministic400IsNotRewrappedAs502(t *testing.T) {
 	require.False(t, errors.As(err, &failoverErr), "400 不得触发 failover")
 }
 
+// ChatGPT Codex 的通用 400 不带 error.code/param；x-oai-request-id 是向
+// OpenAI 关联这次拒绝、继续定位具体 payload 的唯一上游线索，不能因只识别
+// 公共 API 的 x-request-id 而在 Ops 事件里丢成空值。
+func TestHandleErrorResponse_GenericCodex400PreservesOAIRequestID(t *testing.T) {
+	c, rec := newOpenAIUpstreamErrorTestContext(t)
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{
+		LogUpstreamErrorBody: true,
+	}}}
+	resp := newOpenAIUpstreamErrorResponse(http.StatusBadRequest, `{"detail":"Bad Request"}`)
+	resp.Header.Set("X-OAI-Request-Id", "oai-req-generic-400")
+
+	_, err := svc.handleErrorResponse(
+		context.Background(), resp, c, newOpenAIUpstreamErrorTestAccount(), nil,
+	)
+
+	require.Error(t, err)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	rawEvents, ok := c.Get(OpsUpstreamErrorsKey)
+	require.True(t, ok)
+	events, ok := rawEvents.([]*OpsUpstreamErrorEvent)
+	require.True(t, ok)
+	require.Len(t, events, 1)
+	require.Equal(t, "oai-req-generic-400", events[0].UpstreamRequestID)
+	require.Equal(t, "http_error", events[0].Kind)
+	require.Equal(t, http.StatusBadRequest, events[0].UpstreamStatusCode)
+	require.Equal(t, "Bad Request", events[0].Message)
+	require.JSONEq(t, `{"detail":"Bad Request"}`, events[0].Detail)
+}
+
 // 不变式：同一份上游错误体，原生 Responses 与 ChatCompletions/Anthropic 兼容路径
 // 必须给出同样的状态码和同样的 message。这两条路径在同一个 service 上，之前一条对
 // 一条错，正是本次修复的根因；锁死对称性避免将来只改一边。

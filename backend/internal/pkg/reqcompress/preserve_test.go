@@ -28,6 +28,7 @@ func TestExecutePreservesSettledCodingOnOrdinaryHTTPFailures(t *testing.T) {
 	}{
 		{400, `{"error":{"message":"Failed to read request body","type":"invalid_request_error"}}`, responseFailureBodyRead},
 		{400, `{"error":{"message":"Failed to decode JSON request body"}}`, responseFailureHTTP},
+		{400, `{"detail":"Bad Request"}`, responseFailureGenericBadRequest},
 		{400, `{"input":"unsupported brotli","error":{"message":"invalid model"}}`, responseFailureHTTP},
 		{400, `{"error":{"message":"failed to decompress image attachment"}}`, responseFailureHTTP},
 		{500, `<html>failed to decompress request body in an unrelated diagnostic</html>`, responseFailureHTTP},
@@ -180,20 +181,23 @@ func TestExecuteRefreshesSharedCodingForEveryAccountRequest(t *testing.T) {
 	require.Equal(t, sharedAlgorithmTTL, server.TTL(sharedAlgorithmKey(accountID)))
 }
 
-func TestExecuteInitialHealthFailuresDoNotMultiplyTrafficOrPinIdentity(t *testing.T) {
-	for _, status := range []int{400, 403, 500, 502, 503, 504} {
+func TestExecuteInitialFailuresOnlyMultiplyFor400And422(t *testing.T) {
+	for _, status := range []int{400, 422, 403, 500, 502, 503, 504} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			registry := NewRegistry()
 			registry.Sync(814, true, time.Time{})
-			attempts := 0
+			var attempts []string
 			resp, err := registry.Execute(814, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
-				attempts++
-				require.Equal(t, "br", req.Header.Get("Content-Encoding"))
+				attempts = append(attempts, req.Header.Get("Content-Encoding"))
 				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(`{"error":"temporary failure"}`))}, nil
 			})
 			require.NoError(t, err)
 			require.NoError(t, resp.Body.Close())
-			require.Equal(t, 1, attempts)
+			expected := []string{"br"}
+			if status == 400 || status == 422 {
+				expected = []string{"br", "zstd", "deflate", ""}
+			}
+			require.Equal(t, expected, attempts)
 			resp, err = registry.Execute(814, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
 				require.Equal(t, "br", req.Header.Get("Content-Encoding"))
 				return okResponse("recovered"), nil
@@ -273,6 +277,47 @@ func TestExecuteInitialBodyReadFailureOnlyPinsIdentityAfterSuccessfulPlainAttemp
 			require.NoError(t, resp.Body.Close())
 		})
 	}
+}
+
+func TestExecuteBodyReadIdentityRetriesAfterTTL(t *testing.T) {
+	registry := NewRegistry()
+	now := time.Date(2026, 11, 6, 22, 0, 0, 0, time.UTC)
+	registry.nowFunc = func() time.Time { return now }
+	registry.Sync(817, true, time.Time{})
+	brotliRecovered := false
+	var attempts []string
+	send := func(req *http.Request) (*http.Response, error) {
+		coding := req.Header.Get("Content-Encoding")
+		attempts = append(attempts, coding)
+		if coding == "" {
+			return okResponse("identity"), nil
+		}
+		if brotliRecovered && Algorithm(coding) == AlgorithmBrotli {
+			return okResponse("brotli-recovered"), nil
+		}
+		return &http.Response{StatusCode: 400, Body: io.NopCloser(strings.NewReader(`{"error":{"message":"Failed to read request body"}}`))}, nil
+	}
+
+	resp, err := registry.Execute(817, newTestRequest(t, testBody()), send)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, []string{"br", "zstd", "deflate", ""}, attempts)
+
+	now = now.Add(ambiguousIdentityRetryTTL - time.Second)
+	attempts = nil
+	resp, err = registry.Execute(817, newTestRequest(t, testBody()), send)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, []string{""}, attempts)
+
+	now = now.Add(time.Second)
+	brotliRecovered = true
+	attempts = nil
+	resp, err = registry.Execute(817, newTestRequest(t, testBody()), send)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, []string{"br"}, attempts)
+	require.Equal(t, AlgorithmBrotli, registry.SettledAlgorithm(context.Background(), 817))
 }
 
 func TestExecuteInitialMediaTypeFailureDoesNotPoisonNegotiation(t *testing.T) {

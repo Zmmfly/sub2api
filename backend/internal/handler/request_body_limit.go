@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 
@@ -9,12 +8,13 @@ import (
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 // handleRequestBodyReadError handles cancellation and temporary capacity errors
 // and stalled uploads (408) before callers classify malformed or oversized
 // request bodies. Failure logging happens once in the shared reader (httputil).
-func handleRequestBodyReadError(c *gin.Context, err error) bool {
+func handleRequestBodyReadError(c *gin.Context, _ *zap.Logger, err error) bool {
 	if err != nil && !pkghttputil.IsRequestBodyReadDeadline(err) && failoverClientGone(c) {
 		c.Abort()
 		return true
@@ -23,14 +23,6 @@ func handleRequestBodyReadError(c *gin.Context, err error) bool {
 		return true
 	}
 	return middleware2.RejectRequestBodyReadTimeout(c, err)
-}
-
-func extractMaxBytesError(err error) (*http.MaxBytesError, bool) {
-	var maxErr *http.MaxBytesError
-	if errors.As(err, &maxErr) {
-		return maxErr, true
-	}
-	return nil, false
 }
 
 func formatBodyLimit(limit int64) string {

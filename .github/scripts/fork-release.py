@@ -173,6 +173,18 @@ def wait_for_release(repo, tag, ready, phase, timeout=180):
         delay = min(delay * 2, 15)
 
 
+def release_notes(repo, tag, sha):
+    """Use source-controlled notes for this exact release; never rewrite published notes."""
+    if not TAG.fullmatch(tag) or not SHA.fullmatch(sha):
+        raise ValueError('invalid release notes identity')
+    provenance = (f'源码提交：https://github.com/{repo}/commit/{sha}\n\n'
+                  '基于 Wei-Shaw/sub2api，保留上游来源署名与许可证。')
+    notes = Path('.github/release-notes') / f'{tag}.md'
+    if notes.is_file():
+        return notes.read_text(encoding='utf-8').strip() + '\n\n' + provenance
+    return provenance
+
+
 def publish(args):
     if not TAG.fullmatch(args.tag) or not SHA.fullmatch(args.sha):
         raise ValueError('invalid fork tag or commit')
@@ -184,7 +196,7 @@ def publish(args):
     if info is None:
         run('gh', 'release', 'create', args.tag, '--repo', repo, '--verify-tag', '--draft',
             '--title', f'Sub2API {args.tag}', '--notes',
-            f'Fork release of https://github.com/{repo}/commit/{args.sha}.\n\nBased on Wei-Shaw/sub2api; original source attribution and license are retained.')
+            release_notes(repo, args.tag, args.sha))
         info = wait_for_release(repo, args.tag, lambda item: True, 'created draft')
     if info['tag_name'] != args.tag:
         raise ValueError('release tag mismatch')

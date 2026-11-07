@@ -74,10 +74,15 @@ func TestRejectRequestBodyReadErrorCancellation(t *testing.T) {
 		name      string
 		cancelled bool
 		committed bool
+		readErr   error
+		handled   bool
 	}{
-		{name: "cancelled", cancelled: true},
-		{name: "cancelled_after_commit", cancelled: true, committed: true},
+		{name: "cancelled", cancelled: true, handled: true},
+		{name: "cancelled_after_commit", cancelled: true, committed: true, handled: true},
 		{name: "ordinary_read_error"},
+		// A synthetic timeout does not override a pre-existing cancellation.
+		// Real socket deadlines are covered by the HTTP/1 integration test.
+		{name: "read_timeout_with_cancelled_context", cancelled: true, handled: true, readErr: &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
@@ -93,10 +98,14 @@ func TestRejectRequestBodyReadErrorCancellation(t *testing.T) {
 				require.NoError(t, err)
 			}
 			bodyBefore := recorder.Body.String()
-			require.Equal(t, tc.cancelled, RejectRequestBodyReadError(c, io.ErrUnexpectedEOF))
-			require.Equal(t, tc.cancelled, c.IsAborted())
+			readErr := tc.readErr
+			if readErr == nil {
+				readErr = io.ErrUnexpectedEOF
+			}
+			require.Equal(t, tc.handled, RejectRequestBodyReadError(c, "test", readErr))
+			require.Equal(t, tc.handled, c.IsAborted())
 			status := http.StatusOK
-			if tc.cancelled && !tc.committed {
+			if tc.handled && !tc.committed {
 				status = 499
 			}
 			require.Equal(t, status, c.Writer.Status())
@@ -129,7 +138,7 @@ func readBodyThroughMiddleware(t *testing.T, path string, body io.Reader, encodi
 	r.Use(RequestBodyLimit(1<<20, pkghttputil.NewBodyMemoryBudget(1<<20)))
 	r.POST("/*any", func(c *gin.Context) {
 		if _, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request); err != nil {
-			if RejectRequestBodyReadError(c, err) {
+			if RejectRequestBodyReadError(c, "test", err) {
 				return
 			}
 			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "message": "Failed to read request body"}})
@@ -183,7 +192,7 @@ func TestRequestBodyReadTimeoutDoesNotOverrideCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(ctx)
-	require.True(t, RejectRequestBodyReadError(c, os.ErrDeadlineExceeded))
+	require.True(t, RejectRequestBodyReadError(c, "test", os.ErrDeadlineExceeded))
 	require.Equal(t, 499, c.Writer.Status())
 	require.Empty(t, recorder.Body.String())
 }
@@ -202,7 +211,7 @@ func TestRequestBodyReadDeadlineHTTP1Returns408(t *testing.T) {
 			router.POST("/*any", func(c *gin.Context) {
 				c.Request = c.Request.WithContext(logger.IntoContext(c.Request.Context(), zap.New(core)))
 				_, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
-				if !RejectRequestBodyReadError(c, err) {
+				if !RejectRequestBodyReadError(c, "test", err) {
 					c.Status(http.StatusInternalServerError)
 				}
 				done <- readResult{err, c.Request.Context().Err()}
@@ -252,7 +261,7 @@ func TestRequestBodyReadHTTP1ClientDisconnectRemains499(t *testing.T) {
 	router := gin.New()
 	router.POST("/v1/responses", func(c *gin.Context) {
 		_, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
-		RejectRequestBodyReadError(c, err)
+		RejectRequestBodyReadError(c, "test", err)
 		done <- readResult{err, c.Writer.Status(), c.Writer.Size()}
 	})
 	server := httptest.NewServer(pkghttputil.WithWriteTimeout(
@@ -281,7 +290,7 @@ func TestRequestBodyReadTimeoutDoesNotAppendToCommittedResponse(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	_, err := c.Writer.WriteString("already streamed")
 	require.NoError(t, err)
-	require.True(t, RejectRequestBodyReadError(c, os.ErrDeadlineExceeded))
+	require.True(t, RejectRequestBodyReadError(c, "test", os.ErrDeadlineExceeded))
 	require.True(t, c.IsAborted())
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.Equal(t, "already streamed", recorder.Body.String())
@@ -291,7 +300,7 @@ func TestRequestBodyReadDeadlineHTTP2Returns408WithoutClosingConnection(t *testi
 	router := gin.New()
 	router.POST("/v1/responses", func(c *gin.Context) {
 		_, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
-		if !RejectRequestBodyReadError(c, err) {
+		if !RejectRequestBodyReadError(c, "test", err) {
 			c.Status(http.StatusInternalServerError)
 		}
 	})

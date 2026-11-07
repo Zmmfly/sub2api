@@ -16,6 +16,22 @@ OTHER = 'b' * 40
 TAG = 'z0.2.19-1'
 
 
+class ReleaseNotesTests(unittest.TestCase):
+    def test_notes_include_exact_commit_and_chinese_details(self):
+        with patch.object(Path, 'is_file', return_value=True), patch.object(Path, 'read_text', return_value='修复请求体超时与压缩统计'):
+            notes = release.release_notes('Zmmfly/sub2api', TAG, SHA)
+        self.assertIn('修复请求体超时与压缩统计', notes)
+        self.assertIn('/commit/' + SHA, notes)
+
+    def test_missing_notes_preserves_provenance(self):
+        with patch.object(Path, 'is_file', return_value=False):
+            self.assertIn('Wei-Shaw/sub2api', release.release_notes('Zmmfly/sub2api', TAG, SHA))
+
+    def test_rejects_invalid_identity(self):
+        with self.assertRaises(ValueError):
+            release.release_notes('Zmmfly/sub2api', '../notes', SHA)
+
+
 class AllocationTests(unittest.TestCase):
     def test_first_and_upstream_reset(self):
         self.assertEqual(release.choose_version('0.2.19', SHA, {'z0.2.18-90': OTHER}), TAG)

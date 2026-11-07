@@ -5,9 +5,11 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/traffic"
 	"github.com/andybalholm/brotli"
@@ -117,8 +119,13 @@ func readRequestBodyUnlogged(req *http.Request) (requestBodyBuffer, error) {
 		}
 	}
 
+	startedAt := time.Now()
 	raw, err := readRequestBodyChunksWithBudget(req.Context(), req.Body, capHint, req.ContentLength)
 	if err != nil {
+		var readErr *RequestBodyReadError
+		if errors.As(err, &readErr) {
+			readErr.Elapsed = time.Since(startedAt)
+		}
 		return requestBodyBuffer{}, err
 	}
 
@@ -170,21 +177,23 @@ func readRequestBodyChunksWithBudget(ctx context.Context, reader io.Reader, init
 		n := 0
 		var err error
 		for n < len(chunk) && err == nil {
-			if err := ctx.Err(); err != nil {
-				return requestBodyBuffer{}, err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return requestBodyBuffer{}, &RequestBodyReadError{Err: ctxErr, BytesRead: int64(total + n)}
 			}
 			var read int
 			read, err = reader.Read(chunk[n:])
 			n += read
 		}
+		// An actual upload deadline must survive HTTP/1 context cancellation.
+		// Other failures still honor cancellation, without losing progress.
 		if IsRequestBodyReadDeadline(err) {
-			return requestBodyBuffer{}, err
+			return requestBodyBuffer{}, &RequestBodyReadError{Err: err, BytesRead: int64(total + n)}
 		}
-		if err := ctx.Err(); err != nil {
-			return requestBodyBuffer{}, err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return requestBodyBuffer{}, &RequestBodyReadError{Err: ctxErr, BytesRead: int64(total + n)}
 		}
 		if err != nil && err != io.EOF {
-			return requestBodyBuffer{}, err
+			return requestBodyBuffer{}, &RequestBodyReadError{Err: err, BytesRead: int64(total + n)}
 		}
 		if n > 0 {
 			chunks = append(chunks, chunk[:n])

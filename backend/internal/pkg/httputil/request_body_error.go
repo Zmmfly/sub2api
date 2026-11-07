@@ -75,14 +75,15 @@ func RequestBodyReadErrorKind(err error) string {
 		}
 		return RequestBodyErrorKindDecodeContentEncoding
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, syscall.ECONNRESET) ||
+	if strings.Contains(strings.ToLower(err.Error()), "client disconnected") ||
+		errors.Is(err, context.Canceled) || errors.Is(err, syscall.ECONNRESET) ||
 		errors.Is(err, syscall.EPIPE) || errors.Is(err, net.ErrClosed) {
 		return RequestBodyErrorKindClientDisconnect
 	}
 	if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
 		return RequestBodyErrorKindTimeout
 	}
-	if errors.Is(err, io.ErrUnexpectedEOF) {
+	if errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(strings.ToLower(err.Error()), "request declared a content-length") {
 		return RequestBodyErrorKindTruncatedBody
 	}
 	var netErr net.Error
@@ -158,6 +159,15 @@ func logRequestBodyReadFailure(req *http.Request, err error) {
 		zap.String("error_kind", kind),
 		zap.String("content_encoding", ContentEncodingCategory(req.Header)),
 		zap.Int64("content_length", req.ContentLength),
+	}
+	fields = append(fields,
+		zap.String("protocol", req.Proto),
+		zap.Bool("chunked", len(req.TransferEncoding) > 0),
+		zap.Int("status", DescribeRequestBodyReadFailure(req, err).Status),
+	)
+	var readErr *RequestBodyReadError
+	if errors.As(err, &readErr) {
+		fields = append(fields, zap.Int64("bytes_read", readErr.BytesRead), zap.Int64("read_ms", readErr.Elapsed.Milliseconds()))
 	}
 	log := logger.FromContext(ctx)
 	if kind == RequestBodyErrorKindClientDisconnect || (ctx.Err() != nil && !IsRequestBodyReadDeadline(err)) {

@@ -6,13 +6,16 @@ import (
 	"strings"
 
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
 
 // RejectRequestBodyReadError handles early ingress termination before the route
 // handler runs. Cancelled clients have no response body and an uncommitted
 // response is marked 499, matching the gateway handler's cancellation path.
-func RejectRequestBodyReadError(c *gin.Context, err error) bool {
+// Only a deadline observed by our upload reader overrides cancellation.
+// The shared reader owns failure logging, including progress diagnostics.
+func RejectRequestBodyReadError(c *gin.Context, _ string, err error) bool {
 	if err != nil && c != nil && c.Request != nil && c.Request.Context().Err() != nil && !pkghttputil.IsRequestBodyReadDeadline(err) {
 		if !c.Writer.Written() {
 			c.Status(499)
@@ -45,6 +48,7 @@ func RejectRequestBodyReadTimeout(c *gin.Context, err error) bool {
 	}
 	switch {
 	case strings.HasPrefix(path, "/v1beta") || strings.HasPrefix(path, "/antigravity/v1beta"):
+		service.SetOpsLocalErrorType(c, "invalid_request_error", "")
 		GoogleErrorWriter(c, http.StatusRequestTimeout, message)
 	case strings.Contains(path, "/messages"):
 		c.JSON(http.StatusRequestTimeout, gin.H{

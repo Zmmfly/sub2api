@@ -158,6 +158,6 @@ func TestHTTPServerBodyReadTimeoutAnthropicMessages(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(body, &payload))
 	require.Equal(t, "invalid_request_error", payload.Error.Type)
-	require.Equal(t, "Timed out reading request body", payload.Error.Message)
+	require.Equal(t, "Request body upload timed out", payload.Error.Message)
 	require.True(t, resp.Close, "connection with an unread body must not be reused")
 }

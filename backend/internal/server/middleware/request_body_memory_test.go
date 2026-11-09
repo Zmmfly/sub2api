@@ -2,12 +2,15 @@ package middleware
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +19,7 @@ import (
 
 	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -67,6 +71,86 @@ func TestRequestBodyMemoryRejectsOverloadAndReleasesAfterHandler(t *testing.T) {
 		t.Fatal("held request did not finish")
 	}
 	require.Equal(t, http.StatusNoContent, request("/v1/responses").Code)
+}
+
+// Decoding releases its workspace, but the decoded request remains live while
+// the response streams. Route aliases must share that charge until the handler
+// returns, rather than releasing it when decoding or the first flush completes.
+func TestRequestBodyMemoryCompressedStreamRetainsBudgetUntilReturn(t *testing.T) {
+	body := []byte(`{"input":"` + strings.Repeat("x", 700) + `"}`)
+	for _, encoding := range []string{"gzip", "br"} {
+		t.Run(encoding, func(t *testing.T) {
+			var compressed bytes.Buffer
+			var writer io.WriteCloser
+			if encoding == "gzip" {
+				writer = gzip.NewWriter(&compressed)
+			} else {
+				writer = brotli.NewWriter(&compressed)
+			}
+			_, err := writer.Write(body)
+			require.NoError(t, err)
+			require.NoError(t, writer.Close())
+
+			router := gin.New()
+			budget := pkghttputil.NewBodyMemoryBudget(2500)
+			held := make(chan struct{})
+			resume := make(chan struct{})
+			releaseHeld := sync.OnceFunc(func() { close(resume) })
+			defer releaseHeld()
+			handle := func(c *gin.Context) {
+				decoded, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
+				if RejectRequestBodyMemoryOverload(c, err) {
+					return
+				}
+				if err != nil || !bytes.Equal(decoded, body) {
+					c.AbortWithStatus(http.StatusBadRequest)
+					return
+				}
+				c.Header("Content-Type", "text/event-stream")
+				_, _ = c.Writer.WriteString("data: ready\n\n")
+				c.Writer.Flush()
+				if c.Query("hold") == "1" {
+					close(held)
+					<-resume
+				}
+				runtime.KeepAlive(decoded)
+			}
+			for _, path := range []string{"/v1/responses", "/responses"} {
+				router.POST(path, RequestBodyLimit(2048, budget), handle)
+			}
+			request := func(path string) *httptest.ResponseRecorder {
+				w := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(compressed.Bytes()))
+				req.Header.Set("Content-Encoding", encoding)
+				router.ServeHTTP(w, req)
+				return w
+			}
+			firstDone := make(chan *httptest.ResponseRecorder, 1)
+			go func() { firstDone <- request("/v1/responses?hold=1") }()
+			select {
+			case <-held:
+			case <-time.After(5 * time.Second):
+				t.Fatal("compressed request did not reach the streaming handler")
+			}
+
+			rejected := request("/responses")
+			require.Equal(t, http.StatusServiceUnavailable, rejected.Code)
+			require.Equal(t, "1", rejected.Header().Get("Retry-After"))
+			releaseHeld()
+			select {
+			case first := <-firstDone:
+				require.Equal(t, http.StatusOK, first.Code)
+				require.True(t, first.Flushed)
+				require.Equal(t, "data: ready\n\n", first.Body.String())
+			case <-time.After(5 * time.Second):
+				t.Fatal("streaming handler did not finish")
+			}
+			recovered := request("/responses")
+			require.Equal(t, http.StatusOK, recovered.Code)
+			require.True(t, recovered.Flushed)
+			require.Equal(t, "data: ready\n\n", recovered.Body.String())
+		})
+	}
 }
 
 func TestRejectRequestBodyReadErrorCancellation(t *testing.T) {

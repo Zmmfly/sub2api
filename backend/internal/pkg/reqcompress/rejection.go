@@ -37,11 +37,36 @@ var rejectionKeywords = []string{
 	"invalid_encoding",
 }
 
-// Any 400/422 can guide an unverified initial trial through every coding and
-// one identity attempt. Other statuses may fail before the upstream decoded the
-// entity, so they return immediately without multiplying uploads.
-func shouldProbeAfterInitialClientError(resp *http.Response, kind string) bool {
-	if resp == nil || (resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusUnprocessableEntity) {
+// codingSensitiveStatuses are the upstream failures a request content coding
+// can cause: the entity was rejected as malformed, too large or of an
+// unsupported representation, or processing it failed. Authentication,
+// permission, routing, timeout, rate-limit and availability failures
+// (401/403/404/408/429/502/503/504/529, ...) arise independently of how the
+// entity is coded, so they never cost another upload.
+var codingSensitiveStatuses = map[int]struct{}{
+	http.StatusBadRequest:            {},
+	http.StatusRequestEntityTooLarge: {},
+	http.StatusUnsupportedMediaType:  {},
+	http.StatusUnprocessableEntity:   {},
+	http.StatusInternalServerError:   {},
+	http.StatusNotImplemented:        {},
+}
+
+// isCodingSensitiveFailure reports whether resp is a failure the content
+// coding may have caused, so the same request deserves a plain attempt.
+func isCodingSensitiveFailure(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	_, ok := codingSensitiveStatuses[resp.StatusCode]
+	return ok
+}
+
+// A coding-sensitive failure guides an unverified initial trial through every
+// coding and one identity attempt. Other statuses may fail before the upstream
+// decoded the entity, so they return immediately without multiplying uploads.
+func shouldProbeAfterInitialFailure(resp *http.Response, kind string) bool {
+	if !isCodingSensitiveFailure(resp) {
 		return false
 	}
 	return kind == responseFailureHTTP || kind == responseFailureBodyRead || kind == responseFailureGenericBadRequest

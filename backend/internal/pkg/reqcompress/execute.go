@@ -20,8 +20,11 @@ type SendFunc func(*http.Request) (*http.Response, error)
 // request already owns the trial, req is sent unchanged. Otherwise codings are
 // attempted in preference order and the first successful response is returned.
 // Initial trials can try other codings and finally identity. Once a coding has
-// succeeded, HTTP and transport failures do not disprove that capability: the
-// original error is delivered without an identity retry or a cache reset. Only
+// succeeded, a coded attempt that fails with a coding-sensitive status (see
+// codingSensitiveStatuses) is replayed once without content coding, so the
+// caller only sees the plain outcome: a plain success pins identity for
+// ambiguousIdentityRetryTTL, a plain failure keeps the coding. Other HTTP and
+// transport failures do not disprove the coding and are delivered as is. Only
 // an explicit request content-coding rejection retires a settled coding.
 //
 // A coded attempt may be discarded, so it is measured in its own probe
@@ -139,14 +142,17 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 				return resp, nil
 			}
 			if !ownsNegotiation {
-				// Even an identity retry succeeding after a 5xx/403 says nothing
-				// about coding support: a transient outage may just have ended.
-				// Do not multiply traffic or discard a verified capability.
+				if isCodingSensitiveFailure(resp) && req.Context().Err() == nil {
+					return r.replayWithoutCoding(req, accountID, algorithm, negotiation, resp, probe, failureKind, send)
+				}
+				// Auth, permission, rate-limit and availability failures say
+				// nothing about coding support, and a canceled caller cannot
+				// use a replay. Deliver them without multiplying uploads.
 				adoptDeliveredAttempt(req, probe)
 				logPreservedCoding(req, accountID, algorithm, negotiation, resp, failureKind, nil)
 				return resp, nil
 			}
-			if !shouldProbeAfterInitialClientError(resp, failureKind) {
+			if !shouldProbeAfterInitialFailure(resp, failureKind) {
 				// An auth/rate/health error also proves nothing during the
 				// initial trial. Do not upload the body four times or pin
 				// identity just because the provider is temporarily unhealthy.
@@ -154,8 +160,8 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 				adoptDeliveredAttempt(req, probe)
 				return resp, nil
 			}
-			// A 400/422 may be coding-sensitive. Try every coding only in an
-			// unverified trial, without permanently removing this candidate.
+			// The coding may have caused this failure. Try every coding only in
+			// an unverified trial, without permanently removing this candidate.
 			unverifiedCandidates = true
 			fields := append(requestLogFields(req, accountID, algorithm, resp),
 				"reason", failureKind, "error_source", "upstream_response")
@@ -197,7 +203,7 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 				reason = "initial_identity_accepted"
 				retryAt := r.now().Add(ambiguousIdentityRetryTTL)
 				negotiation.pinIdentityUntil(retryAt)
-				r.persistSharedIdentity(req.Context(), accountID, negotiation, retryAt)
+				r.persistSharedIdentity(req.Context(), accountID, negotiation, retryAt, AlgorithmNone)
 			} else {
 				negotiation.pinIdentity()
 			}
@@ -216,6 +222,31 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 		}
 	}
 	return identityResp, identityErr
+}
+
+// replayWithoutCoding resends req without content coding after its settled
+// coding produced a coding-sensitive failure, so an upstream that stopped
+// decoding the coding for some entities never fails the caller. The coded
+// attempt is discarded: its wire cost is logged and kept out of the usage
+// record, which measures the delivered plain attempt instead. A plain success
+// pins identity for ambiguousIdentityRetryTTL locally and in shared state;
+// afterwards the remaining candidates, led by the failed coding, are probed
+// again. A plain failure proves nothing against the coding, which stays
+// settled, and is delivered in place of the coded failure.
+func (r *Registry) replayWithoutCoding(req *http.Request, accountID int64, algorithm Algorithm, negotiation *state,
+	coded *http.Response, probe *traffic.Collector, reason string, send SendFunc) (*http.Response, error) {
+	fields := append(requestLogFields(req, accountID, algorithm, coded), discardedAttemptLogFields(probe)...)
+	drainAndClose(coded)
+	resp, err := send(req)
+	pinned := false
+	if err == nil && encodingAccepted(resp) {
+		retryAt := r.now().Add(ambiguousIdentityRetryTTL)
+		if pinned = negotiation.demoteSettled(algorithm, retryAt); pinned {
+			r.persistSharedIdentity(req.Context(), accountID, negotiation, retryAt, algorithm)
+		}
+	}
+	logIdentityReplay(req, negotiation, algorithm, fields, reason, resp, err, pinned)
+	return resp, err
 }
 
 // encodingAccepted reports whether a response proves the upstream decoded the

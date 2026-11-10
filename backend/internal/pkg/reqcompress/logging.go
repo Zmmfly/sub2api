@@ -64,6 +64,35 @@ func logPreservedCoding(req *http.Request, accountID int64, algorithm Algorithm,
 	}
 }
 
+// logIdentityReplay records a failed coded attempt that a plain attempt of the
+// same request replaced. fields describe the discarded coded attempt. Neither
+// payloads nor error bodies are logged. A recovery is logged at Warn: it
+// demotes the coding, so it recurs at most once per identity TTL per account
+// (plus requests already in flight). Failed replays are rate limited like
+// preserved codings, since an ordinary invalid request fails both ways.
+func logIdentityReplay(req *http.Request, negotiation *state, algorithm Algorithm, fields []any,
+	reason string, plain *http.Response, plainErr error, pinned bool) {
+	fields = append(fields, "reason", reason, "error_source", "upstream_response", "identity_retry", true)
+	switch {
+	case plainErr != nil:
+		fields = append(fields, "identity_error_kind", transportErrorKind(plainErr))
+	case plain != nil:
+		fields = append(fields, "identity_status", plain.StatusCode, "identity_upstream_request_id", upstreamRequestID(plain))
+	}
+	if plainErr == nil && encodingAccepted(plain) {
+		fields = append(fields, "identity_pinned", pinned,
+			"identity_ttl_seconds", int(ambiguousIdentityRetryTTL/time.Second))
+		slog.WarnContext(req.Context(), "reqcompress identity replay recovered", fields...)
+		return
+	}
+	fields = append(fields, "coding_preserved", negotiation.settledAlgorithm() == algorithm)
+	if negotiation.claimFailureLog(time.Now()) {
+		slog.WarnContext(req.Context(), "reqcompress identity replay failed", fields...)
+	} else {
+		slog.DebugContext(req.Context(), "reqcompress identity replay failed", fields...)
+	}
+}
+
 // transportErrorKind keeps diagnostics useful without logging a url.Error that
 // could contain upstream query credentials or a proxy password.
 func transportErrorKind(err error) string {

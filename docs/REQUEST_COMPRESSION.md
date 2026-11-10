@@ -4,19 +4,21 @@
 
 账号启用请求体压缩后，首次探测按 `br → zstd → deflate` 尝试。只有上游成功响应才确认编码可用。
 
-已经确认的编码不会因为普通 HTTP 错误、超时、断连，或泛化的 `Failed to read request body` 响应而被禁用。这些失败原样交给网关的错误处理，不在压缩层额外重发未压缩 POST，避免重复上传放大带宽。
+已经确认的编码不会因为普通 HTTP 错误、超时、断连，或泛化的 `Failed to read request body` 响应而被禁用。与请求体编码无关的失败（401/403/404/408/429/502/503/504/529 等认证、权限、路由、超时、限流和可用性错误）以及传输错误原样交给网关的错误处理，不在压缩层额外重发未压缩 POST，避免重复上传放大带宽。
 
-只有明确指向请求 Content-Encoding 不兼容的诊断才会退役已确认的编码，并尝试其它编码。裸 HTTP 415 可能是 Content-Type 不兼容，不能单独推翻已确认的编码。错误 JSON 中回显的输入、图片解压错误和上游响应解压错误也不能作为请求编码被拒绝的证据。
+可能由编码引起的失败（400/413/415/422/500/501，包括 ChatGPT Codex 只返回 `{"detail":"Bad Request"}` 的情况）会立即用明文重发同一请求一次。调用方只看到明文请求的结果；被丢弃的压缩尝试只记日志（含发送字节数），不计入用量流量。明文成功说明这次失败与编码有关：该账号临时固定为明文 **30 分钟**（同时写入 Redis），期间请求直接以明文发送，到期后从失败的编码开始重新探测。明文也失败说明失败与编码无关，原编码保留，调用方收到明文请求的响应或传输错误。调用方已经断开时不重发。
 
-首次探测时，任何 400/422（包括普通业务 400/422）都会继续尝试全部编码和一次明文请求；401/403、限流和上游 5xx 不会触发连续重试。只有明文成功才暂时固定为非压缩；所有编码及明文都返回 400/422 时保持协商未完成，后续请求可以重新执行完整探测。首次探测的裸 415 也遵循这个限制：未压缩请求同样失败时，不会把所有编码判成不支持。明确拒绝所有候选编码的上游仍会使用非压缩请求。
+只有明确指向请求 Content-Encoding 不兼容的诊断才会退役已确认的编码，并尝试其它编码。裸 HTTP 415 可能是 Content-Type 不兼容，不能单独退役已确认的编码，只会触发上面的明文重发。错误 JSON 中回显的输入、图片解压错误和上游响应解压错误也不能作为请求编码被拒绝的证据。
 
-上述 400/422 连续探测只允许发生在尚未确认编码的首次协商；已确认编码后再次出现相同响应，仍按普通 HTTP 错误处理，不做未压缩重放。
+首次探测时，任何 400/413/422/500/501（包括普通业务 400/422）都会继续尝试全部编码和一次明文请求；401/403、限流和 502/503/504 等不会触发连续重试。只有明文成功才暂时固定为非压缩；所有编码及明文都失败时保持协商未完成，后续请求可以重新执行完整探测。首次探测的裸 415 也遵循这个限制：未压缩请求同样失败时，不会把所有编码判成不支持。明确拒绝所有候选编码的上游仍会使用非压缩请求。
 
-首次探测出现这些可重试失败后，明文成功只固定 **30 分钟**，到期自动重新探测剩余候选，避免偶发成功把账号永久降级为明文。明确拒绝所有候选编码后固定明文不受这个 TTL 影响，因为它代表已经确认的能力结论。
+连续尝试全部编码只发生在尚未确认编码的首次协商；已确认编码后，同类失败最多多一次明文上传，不会再尝试其它编码。
 
-这种限时明文结果以 `identity` 值写入同一个 Redis algorithm 键，TTL 固定为 30 分钟，读取和请求不会续期。各实例通过原子读取值与 PTTL 对齐同一个截止时间；后启动的实例只继承剩余时间。重复发布不会延长已有 identity，另一实例已确认的压缩结果也不会被迟到的 identity 覆盖。到期后重新协商成功会用普通压缩结果及 6 小时滑动 TTL 覆盖它。明确拒绝产生的永久明文不写 Redis。
+首次探测或已确认编码的明文重发出现这些失败后，明文成功只固定 **30 分钟**，到期自动重新探测剩余候选，避免偶发成功把账号永久降级为明文。明确拒绝所有候选编码后固定明文不受这个 TTL 影响，因为它代表已经确认的能力结论。
 
-覆盖：`TestExecutePreservesSettledCodingOnOrdinaryHTTPFailures`、`TestExecutePreservesSettledCodingOnTransportFailure`、`TestExecuteInitialFailuresOnlyMultiplyFor400And422`、`TestExecuteProbesAllCodingsOnInitialOrdinaryClientError`、`TestExecuteInitialOrdinaryClientErrorIdentitySuccessUsesTemporaryIdentity`、`TestExecuteInitialBodyReadFailureOnlyPinsIdentityAfterSuccessfulPlainAttempt`、`TestExecuteProbesIdentityAfterInitialGenericCodexBadRequest`、`TestExecuteBodyReadIdentityRetriesAfterTTL`、`TestPersistSharedIdentityScriptPreservesCodingAndDeadline`、`TestRegistrySharesAmbiguousIdentityAcrossInstancesUntilTTL`、`TestUpstreamRequestCompressionGenericCodex400FallsBackToIdentity`、`TestUpstreamRequestCompressionPreservesVerifiedCodingAcrossHTTPFailures`。
+这种限时明文结果以 `identity` 值写入同一个 Redis algorithm 键，TTL 固定为 30 分钟，读取和请求不会续期。各实例通过原子读取值与 PTTL 对齐同一个截止时间；后启动的实例只继承剩余时间。重复发布不会延长已有 identity，另一实例已确认的压缩结果也不会被迟到的 identity 覆盖；已确认编码的明文重发只替换 Redis 中正是失败的那个编码。仍在本地持有该编码的其他实例在自己遇到同类失败并明文重发之前继续压缩，但它们的续期不会覆盖或延长共享的 identity。到期后重新协商成功会用普通压缩结果及 6 小时滑动 TTL 覆盖它。明确拒绝产生的永久明文不写 Redis。
+
+覆盖：`TestExecutePreservesSettledCodingOnOrdinaryHTTPFailures`、`TestExecutePreservesSettledCodingOnTransportFailure`、`TestExecuteReplaysSettledCodingFailureWithoutCoding`、`TestExecuteReplayFailureKeepsSettledCoding`、`TestExecuteReplayTransportFailureKeepsSettledCoding`、`TestExecuteDoesNotReplayForCanceledCaller`、`TestStateDemoteSettledOnlyReplacesTheFailedSettledCoding`、`TestExecuteInitialFailuresOnlyMultiplyForCodingSensitiveStatuses`、`TestExecuteProbesAllCodingsOnInitialOrdinaryClientError`、`TestExecuteInitialOrdinaryClientErrorIdentitySuccessUsesTemporaryIdentity`、`TestExecuteInitialBodyReadFailureOnlyPinsIdentityAfterSuccessfulPlainAttempt`、`TestExecuteProbesIdentityAfterInitialGenericCodexBadRequest`、`TestExecuteBodyReadIdentityRetriesAfterTTL`、`TestPersistSharedIdentityScriptPreservesCodingAndDeadline`、`TestPersistSharedIdentityScriptReplacesOnlyTheFailedCoding`、`TestRegistrySharesAmbiguousIdentityAcrossInstancesUntilTTL`、`TestRegistrySharesIdentityDemotionAcrossInstances`、`TestUpstreamRequestCompressionGenericCodex400FallsBackToIdentity`、`TestUpstreamRequestCompressionPreservesVerifiedCodingAcrossHTTPFailures`、`TestUpstreamRequestCompressionReplaysCodingSensitiveFailureAsIdentity`。
 
 ## Redis：6 小时滑动过期
 
@@ -34,8 +36,10 @@
 
 | 日志/字段 | 意义 |
 | --- | --- |
-| `reqcompress coding preserved`，`direction=upstream`，`error_source=upstream_response` | 上游返回错误；保留已有编码，`identity_retry=false` |
+| `reqcompress coding preserved`，`direction=upstream`，`error_source=upstream_response` | 上游返回与编码无关的错误；保留已有编码，`identity_retry=false` |
 | 同上，`error_source=upstream_transport` | 到上游的传输失败；`error_kind` 区分超时、连接重置、关闭、EOF、DNS 等，不记录可能含凭据的完整 URL 错误 |
+| `reqcompress identity replay recovered`，`identity_retry=true` | 已确认编码的请求返回可能由编码引起的失败（`status`、`reason`），明文重发成功（`identity_status`）；`identity_pinned=true` 表示该账号已临时改为明文，时长见 `identity_ttl_seconds` |
+| `reqcompress identity replay failed`，`identity_retry=true` | 明文重发也失败（`identity_status` 或 `identity_error_kind`），失败与编码无关；`coding_preserved=true` 表示原编码保留 |
 | `read request body failed`，`direction=downstream_ingress` | 本服务读取客户端/反向代理上传的请求体失败，发生在上游转发之前 |
 | `close/flush/write response compressor`，`direction=downstream_egress` | 本服务向客户端/反向代理写响应失败；不是请求压缩协商失败 |
 
@@ -45,8 +49,8 @@ HTTP/1 的 socket 读取超时也会导致 Go 取消请求 context，因此不�
 
 响应压缩中的 EPIPE、连接重置等明确下游断连记为 Info，每个请求只记录一次；真实写超时和压缩器初始化故障保持 Warn。写失败不会尝试在已输出的压缩流中混入未压缩数据。
 
-压缩状态保留日志按账号每分钟最多一条 Warn，其余记录在 Debug；日志带本地 `request_id`（如果请求上下文提供）和上游 `upstream_request_id`（如果响应提供），便于关联。上游请求 ID 依次取 `x-request-id`、`x-oai-request-id`（ChatGPT Codex 只返回这个）、`request-id`、`x-amzn-requestid`，都没有时才用 Cloudflare 的 `cf-ray`。不要只按某一条下游 broken-pipe 日志推断账号请求压缩已失效。
+压缩状态保留日志和明文重发失败日志按账号每分钟最多一条 Warn，其余记录在 Debug；明文重发成功日志每次都记 Warn，之后账号固定为明文，所以频率受 30 分钟 TTL 限制。日志带本地 `request_id`（如果请求上下文提供）和上游 `upstream_request_id`（如果响应提供），便于关联；明文重发日志另带明文请求的 `identity_upstream_request_id`。上游请求 ID 依次取 `x-request-id`、`x-oai-request-id`（ChatGPT Codex 只返回这个）、`request-id`、`x-amzn-requestid`，都没有时才用 Cloudflare 的 `cf-ray`。不要只按某一条下游 broken-pipe 日志推断账号请求压缩已失效。
 
-覆盖：`logging_test.go`、`httputil/request_body_error_test.go`、`handler/request_body_read_log_test.go`、`middleware/request_body_memory_test.go`、`middleware/response_compress_error_test.go`。
+覆盖：`logging_test.go`、`replay_test.go`、`httputil/request_body_error_test.go`、`handler/request_body_read_log_test.go`、`middleware/request_body_memory_test.go`、`middleware/response_compress_error_test.go`。
 
 仅凭 `Failed to read request body` JSON 无法确定生产故障根因：它既可能由本服务入站读取生成，也可能由上游返回。需要结合上述方向、分类和同一时段的代理/客户端日志判断；保留压缩能力和补齐日志不能修复外部网络截断或上游自身故障。

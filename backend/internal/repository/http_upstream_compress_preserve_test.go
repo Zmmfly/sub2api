@@ -21,7 +21,8 @@ import (
 
 // This real-transport path also exercises the receiver's body decoder: a
 // compressed POST must stay replayable, length-correct and intact through
-// HTTP failures instead of amplifying bandwidth with identity retries.
+// HTTP failures unrelated to the coding (docs/REQUEST_COMPRESSION.md) instead
+// of amplifying bandwidth with identity retries.
 func TestUpstreamRequestCompressionPreservesVerifiedCodingAcrossHTTPFailures(t *testing.T) {
 	const accountID int64 = 990000004
 	cache := miniredis.RunT(t)
@@ -65,7 +66,7 @@ func TestUpstreamRequestCompressionPreservesVerifiedCodingAcrossHTTPFailures(t *
 	}))
 	defer server.Close()
 
-	for i, status := range []int{200, 400, 403, 415, 500, 502, 503, 504, 200} {
+	for i, status := range []int{200, 401, 403, 429, 502, 503, 504, 200} {
 		responseStatus.Store(int32(status))
 		cache.FastForward(time.Hour)
 		collector := traffic.NewCollector()

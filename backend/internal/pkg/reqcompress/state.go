@@ -143,6 +143,25 @@ func (s *state) pinIdentityUntil(retryAt time.Time) {
 	}
 }
 
+// demoteSettled temporarily pins identity after the settled coding failed a
+// request that then succeeded without content coding. It applies only while
+// algorithm is still the settled coding, so a concurrent retirement,
+// renegotiation or identity pin is never overwritten. (A state replaced by an
+// administrative reset is detached; persistSharedIdentity then skips Redis.)
+// The remaining candidates, led by the failed coding, reopen at retryAt.
+func (s *state) demoteSettled(algorithm Algorithm, retryAt time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if algorithm == AlgorithmNone || !s.tested || s.negotiating || s.current != algorithm {
+		return false
+	}
+	s.current = AlgorithmNone
+	s.sharedLoaded = true
+	s.identityRetryAt = retryAt
+	return true
+}
+
 func (s *state) identityRetry() (time.Time, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -79,14 +79,17 @@ return {current, redis.call('PTTL', KEYS[1])}
 `)
 
 // persistSharedIdentityScript lets a proven coding win over a late identity
-// result and never extends an existing shared identity deadline. Only a fresh
+// result and never extends an existing shared identity deadline. ARGV[2] names
+// the only coding identity may replace: a settled coding whose failure a plain
+// replay of the same request just recovered. It is empty after an initial
+// trial, so a coding another instance negotiated is always kept. Only a fresh
 // negotiation after the old identity expired may create a new 30-minute value.
 var persistSharedIdentityScript = redis.NewScript(`
 local current = redis.call('GET', KEYS[1])
 if current == 'identity' then
     return 2
 end
-if current then
+if current and current ~= ARGV[2] then
     return 0
 end
 redis.call('SET', KEYS[1], 'identity', 'PX', ARGV[1])
@@ -246,8 +249,10 @@ func (r *Registry) hydrateShared(ctx context.Context, accountID int64, negotiati
 
 // persistSharedIdentity publishes the same 30-minute ambiguous-identity
 // deadline to every instance. It never slides on reads or requests; the key
-// expires naturally before candidates are retried.
-func (r *Registry) persistSharedIdentity(ctx context.Context, accountID int64, negotiation *state, retryAt time.Time) {
+// expires naturally before candidates are retried. replaceable is the settled
+// coding a plain replay just recovered from, or AlgorithmNone after an initial
+// trial; any other shared coding is kept.
+func (r *Registry) persistSharedIdentity(ctx context.Context, accountID int64, negotiation *state, retryAt time.Time, replaceable Algorithm) {
 	client := r.sharedRedis()
 	if client == nil || negotiation == nil {
 		return
@@ -273,7 +278,7 @@ func (r *Registry) persistSharedIdentity(ctx context.Context, accountID int64, n
 	defer cancel()
 	if err := persistSharedIdentityScript.Run(ctx, client,
 		[]string{sharedAlgorithmKey(accountID), sharedInvalidationKey(accountID)},
-		ttl.Milliseconds()).Err(); err != nil {
+		ttl.Milliseconds(), string(replaceable)).Err(); err != nil {
 		slog.Warn("reqcompress shared identity store failed", "account_id", accountID, "error", err)
 	}
 }

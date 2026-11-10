@@ -18,32 +18,24 @@ import (
 )
 
 // docs/REQUEST_COMPRESSION.md: a verified coding is a capability, not a health
-// check. Ordinary HTTP errors (including the production body-read diagnostic)
-// cannot invalidate it or trigger an uncompressed POST replay.
+// check. Failures that arise independently of the entity coding (auth,
+// permission, routing, timeout, rate limit, availability) cannot invalidate it
+// or trigger an uncompressed POST replay.
 func TestExecutePreservesSettledCodingOnOrdinaryHTTPFailures(t *testing.T) {
 	for _, tc := range []struct {
 		status int
 		body   string
 		kind   string
 	}{
-		{400, `{"error":{"message":"Failed to read request body","type":"invalid_request_error"}}`, responseFailureBodyRead},
-		{400, `{"error":{"message":"Failed to decode JSON request body"}}`, responseFailureHTTP},
-		{400, `{"detail":"Bad Request"}`, responseFailureGenericBadRequest},
-		{400, `{"input":"unsupported brotli","error":{"message":"invalid model"}}`, responseFailureHTTP},
-		{400, `{"error":{"message":"failed to decompress image attachment"}}`, responseFailureHTTP},
-		{500, `<html>failed to decompress request body in an unrelated diagnostic</html>`, responseFailureHTTP},
-		{500, `{"error":{"message":"failed to decode upstream response content-encoding"}}`, responseFailureHTTP},
 		{401, `{"error":{"message":"invalid token"}}`, responseFailureHTTP},
 		{403, `{"error":"rejected request"}`, responseFailureHTTP},
+		{404, `{"error":"not found"}`, responseFailureHTTP},
 		{408, `{"error":"timeout"}`, responseFailureHTTP},
-		{415, `{"error":{"message":"unsupported media type application/json"}}`, responseFailureMediaType},
-		{415, "", responseFailureMediaType},
-		{422, `{"error":{"message":"invalid model zstd"}}`, responseFailureHTTP},
 		{429, `{"error":"rate limited"}`, responseFailureHTTP},
-		{500, `{"error":"temporary failure"}`, responseFailureHTTP},
 		{502, `{"error":"bad gateway"}`, responseFailureHTTP},
 		{503, `{"error":"unavailable"}`, responseFailureHTTP},
 		{504, `{"error":"gateway timeout"}`, responseFailureHTTP},
+		{529, `{"error":"overloaded"}`, responseFailureHTTP},
 	} {
 		t.Run(fmt.Sprintf("%d/%s", tc.status, tc.body), func(t *testing.T) {
 			server, client := sharedTestRedis(t)
@@ -181,8 +173,10 @@ func TestExecuteRefreshesSharedCodingForEveryAccountRequest(t *testing.T) {
 	require.Equal(t, sharedAlgorithmTTL, server.TTL(sharedAlgorithmKey(accountID)))
 }
 
-func TestExecuteInitialFailuresOnlyMultiplyFor400And422(t *testing.T) {
-	for _, status := range []int{400, 422, 403, 500, 502, 503, 504} {
+// docs/REQUEST_COMPRESSION.md: only coding-sensitive failures probe every
+// coding and identity during the initial trial.
+func TestExecuteInitialFailuresOnlyMultiplyForCodingSensitiveStatuses(t *testing.T) {
+	for _, status := range []int{400, 413, 422, 500, 501, 401, 403, 404, 408, 429, 502, 503, 504, 529} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			registry := NewRegistry()
 			registry.Sync(814, true, time.Time{})
@@ -194,7 +188,8 @@ func TestExecuteInitialFailuresOnlyMultiplyFor400And422(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, resp.Body.Close())
 			expected := []string{"br"}
-			if status == 400 || status == 422 {
+			switch status {
+			case 400, 413, 422, 500, 501:
 				expected = []string{"br", "zstd", "deflate", ""}
 			}
 			require.Equal(t, expected, attempts)

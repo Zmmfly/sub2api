@@ -45,7 +45,7 @@ HTTP/1 的 socket 读取超时也会导致 Go 取消请求 context，因此不�
 
 响应压缩中的 EPIPE、连接重置等明确下游断连记为 Info，每个请求只记录一次；真实写超时和压缩器初始化故障保持 Warn。写失败不会尝试在已输出的压缩流中混入未压缩数据。
 
-压缩状态保留日志按账号每分钟最多一条 Warn，其余记录在 Debug；日志带本地 `request_id`（如果请求上下文提供）和上游 `upstream_request_id`（如果响应提供），便于关联。不要只按某一条下游 broken-pipe 日志推断账号请求压缩已失效。
+压缩状态保留日志按账号每分钟最多一条 Warn，其余记录在 Debug；日志带本地 `request_id`（如果请求上下文提供）和上游 `upstream_request_id`（如果响应提供），便于关联。上游请求 ID 依次取 `x-request-id`、`x-oai-request-id`（ChatGPT Codex 只返回这个）、`request-id`、`x-amzn-requestid`，都没有时才用 Cloudflare 的 `cf-ray`。不要只按某一条下游 broken-pipe 日志推断账号请求压缩已失效。
 
 覆盖：`logging_test.go`、`httputil/request_body_error_test.go`、`handler/request_body_read_log_test.go`、`middleware/request_body_memory_test.go`、`middleware/response_compress_error_test.go`。
 

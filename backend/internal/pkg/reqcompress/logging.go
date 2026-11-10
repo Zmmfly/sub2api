@@ -91,12 +91,14 @@ func transportErrorKind(err error) string {
 }
 
 // upstreamRequestID picks common request-id response headers for log
-// correlation. Missing headers yield an empty string.
+// correlation. Provider IDs win over the Cloudflare ray ID: the ChatGPT Codex
+// endpoint reports its ID only in x-oai-request-id. Missing headers yield an
+// empty string.
 func upstreamRequestID(resp *http.Response) string {
 	if resp == nil || resp.Header == nil {
 		return ""
 	}
-	for _, key := range []string{"x-request-id", "request-id", "x-amzn-requestid", "cf-ray"} {
+	for _, key := range []string{"x-request-id", "x-oai-request-id", "request-id", "x-amzn-requestid", "cf-ray"} {
 		if value := strings.TrimSpace(resp.Header.Get(key)); value != "" {
 			return value
 		}

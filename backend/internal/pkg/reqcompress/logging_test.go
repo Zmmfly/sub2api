@@ -176,3 +176,23 @@ func TestExecuteLogsSettledCodingAtInfo(t *testing.T) {
 	require.Contains(t, out, "compressed_bytes=")
 	require.Contains(t, out, "ratio_percent=")
 }
+
+// docs/REQUEST_COMPRESSION.md: upstream request IDs are picked in the order
+// x-request-id, x-oai-request-id, request-id, x-amzn-requestid, then the
+// Cloudflare cf-ray that production logs used to show for ChatGPT Codex.
+func TestUpstreamRequestIDPrefersProviderIDsOverCloudflareRay(t *testing.T) {
+	header := http.Header{}
+	resp := &http.Response{Header: header}
+	require.Empty(t, upstreamRequestID(resp))
+	for _, tc := range []struct{ header, value string }{
+		{"Cf-Ray", "a581ba973908ce86-SIN"},
+		{"X-Amzn-Requestid", "bedrock-request"},
+		{"Request-Id", "anthropic-request"},
+		{"X-Oai-Request-Id", "chatgpt-request"},
+		{"X-Request-Id", "openai-request"},
+	} {
+		header.Set(tc.header, tc.value)
+		require.Equal(t, tc.value, upstreamRequestID(resp), "%s outranks every header added before it", tc.header)
+	}
+	require.Empty(t, upstreamRequestID(nil))
+}

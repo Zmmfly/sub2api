@@ -5,14 +5,16 @@
 // entities. An account that opts in begins with an ordered trial
 // (br -> zstd -> deflate) and keeps the first coding the upstream accepts.
 // A coding the upstream explicitly rejects is dropped. Ordinary HTTP and
-// transport failures preserve an already verified coding without identity
-// retries; only explicit coding rejections restart negotiation.
+// transport failures preserve an already verified coding. Coding-sensitive
+// failures get one plain replay; successful recovery temporarily uses identity.
 //
 // The administrator's on/off switch is persisted in the account database row.
 // When Redis is configured, successful codings are shared with a six-hour
 // sliding TTL refreshed by each account request. Ambiguous-identity downgrades
 // share a fixed 30-minute TTL; explicit identity-only results remain local.
-// Local memory retains either result if Redis is unavailable.
+// Redis is authoritative on every request. An unreadable shared snapshot sends
+// that request plain and is retried on the next request. Without Redis, local
+// memory retains the coding and bounds ambiguous identity to 30 minutes.
 package reqcompress
 
 import (
@@ -26,12 +28,13 @@ import (
 )
 
 // Registry holds the local per-account switch and negotiation cache. The
-// optional shared client is used only to initialize and update negotiated state.
+// optional shared client is authoritative for every request and state transition.
 type Registry struct {
 	mu            sync.RWMutex
 	entries       map[int64]*entry
 	shared        *redis.Client
-	sharedRefresh *redis.Client // shares the pool, with short renewal socket deadlines
+	sharedRefresh *redis.Client // shares the pool, with short snapshot socket deadlines
+	sharedWrite   *redis.Client // shares the pool, with bounded transition socket deadlines
 	levelProvider compresslevel.Provider
 	nowFunc       func() time.Time
 }
@@ -71,9 +74,10 @@ func (r *Registry) now() time.Time {
 // entry is the registry slot for one account. The map pointer is guarded by
 // Registry.mu; the fields are guarded by entry.mu.
 type entry struct {
-	mu       sync.Mutex
-	syncedAt time.Time
-	state    *state
+	mu         sync.Mutex
+	syncedAt   time.Time
+	state      *state
+	sharedRead *sharedReadFlight // coalesces concurrent request snapshots; guarded by mu
 	// sharedMu serializes every Redis write for this account (persist,
 	// refresh, delete) in call order. It is held across network I/O, so mu
 	// must never be held while taking it or while waiting on Redis: mu guards

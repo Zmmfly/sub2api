@@ -71,7 +71,7 @@ func logPreservedCoding(req *http.Request, accountID int64, algorithm Algorithm,
 // (plus requests already in flight). Failed replays are rate limited like
 // preserved codings, since an ordinary invalid request fails both ways.
 func logIdentityReplay(req *http.Request, negotiation *state, algorithm Algorithm, fields []any,
-	reason string, plain *http.Response, plainErr error, pinned bool) {
+	reason string, plain *http.Response, plainErr error, pinned bool, remainingTTL time.Duration) {
 	fields = append(fields, "reason", reason, "error_source", "upstream_response", "identity_retry", true)
 	switch {
 	case plainErr != nil:
@@ -81,7 +81,7 @@ func logIdentityReplay(req *http.Request, negotiation *state, algorithm Algorith
 	}
 	if plainErr == nil && encodingAccepted(plain) {
 		fields = append(fields, "identity_pinned", pinned,
-			"identity_ttl_seconds", int(ambiguousIdentityRetryTTL/time.Second))
+			"identity_ttl_seconds", int((remainingTTL+time.Second-1)/time.Second))
 		slog.WarnContext(req.Context(), "reqcompress identity replay recovered", fields...)
 		return
 	}
@@ -91,6 +91,33 @@ func logIdentityReplay(req *http.Request, negotiation *state, algorithm Algorith
 	} else {
 		slog.DebugContext(req.Context(), "reqcompress identity replay failed", fields...)
 	}
+}
+
+// identityOutcome describes the currently installed local view after the
+// shared write has reconciled its result. A superseded/failed publication must
+// not be logged as an established cooldown, nor report a fresh 30 minutes when
+// Redis returned an existing identity's shorter remaining lifetime.
+func (r *Registry) identityOutcome(accountID int64, negotiation *state) (bool, time.Duration) {
+	slot := r.existingSlot(accountID)
+	if slot == nil || negotiation == nil {
+		return false, 0
+	}
+	now := r.now()
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+	if slot.state != negotiation {
+		return false, 0
+	}
+	negotiation.mu.Lock()
+	defer negotiation.mu.Unlock()
+	if !negotiation.tested || negotiation.current != AlgorithmNone {
+		return false, 0
+	}
+	if negotiation.identityRetryAt.IsZero() {
+		return true, 0
+	}
+	remaining := max(negotiation.identityRetryAt.Sub(now), 0)
+	return remaining > 0, remaining
 }
 
 // transportErrorKind keeps diagnostics useful without logging a url.Error that

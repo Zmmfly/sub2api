@@ -32,6 +32,23 @@ func DetachUpstreamContext(ctx context.Context, timeout ...time.Duration) contex
 	return context.WithValue(context.WithoutCancel(ctx), upstreamDrainKey{}, policy)
 }
 
+// UpstreamClientErr reports cancellation of ctx or its original client, even
+// when ctx was detached to drain an in-flight response for billing. Check it
+// before retrying an upstream request: a drain budget permits finishing an
+// existing attempt, not starting another one after the client leaves.
+func UpstreamClientErr(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if policy, ok := ctx.Value(upstreamDrainKey{}).(upstreamDrainPolicy); ok {
+		return policy.client.Err()
+	}
+	return nil
+}
+
 // NewUpstreamAttemptContext starts a total drain budget when the original client
 // context is cancelled. Incoming bytes do not extend this budget. Until then the
 // request may stream for arbitrarily long, and late usage remains readable

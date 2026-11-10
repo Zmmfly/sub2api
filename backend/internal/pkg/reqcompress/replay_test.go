@@ -292,40 +292,9 @@ func TestStateDemoteSettledOnlyReplacesTheFailedSettledCoding(t *testing.T) {
 	require.Equal(t, []Algorithm{AlgorithmZstd, AlgorithmDeflate}, work, "the failed coding leads the new trial")
 }
 
-func TestPersistSharedIdentityScriptReplacesOnlyTheFailedCoding(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	const accountID int64 = 713
-	key := sharedAlgorithmKey(accountID)
-	run := func(replaceable Algorithm) {
-		t.Helper()
-		require.NoError(t, persistSharedIdentityScript.Run(context.Background(), client,
-			[]string{key, sharedInvalidationKey(accountID)}, ambiguousIdentityRetryTTL.Milliseconds(), string(replaceable)).Err())
-	}
-
-	// A different coding settled by another instance survives a zstd demotion.
-	require.NoError(t, server.Set(key, string(AlgorithmDeflate)))
-	server.SetTTL(key, sharedAlgorithmTTL)
-	run(AlgorithmZstd)
-	requireSharedAlgorithm(t, server, accountID, AlgorithmDeflate)
-	require.Equal(t, sharedAlgorithmTTL, server.TTL(key))
-
-	// The failed coding itself becomes a fixed 30-minute identity.
-	require.NoError(t, server.Set(key, string(AlgorithmZstd)))
-	server.SetTTL(key, sharedAlgorithmTTL)
-	run(AlgorithmZstd)
-	requireSharedAlgorithm(t, server, accountID, Algorithm(sharedIdentityValue))
-	require.Equal(t, ambiguousIdentityRetryTTL, server.TTL(key))
-
-	// Later demotions never extend the shared identity deadline.
-	server.FastForward(10 * time.Minute)
-	run(AlgorithmZstd)
-	require.Equal(t, 20*time.Minute, server.TTL(key))
-}
-
 // docs/REQUEST_COMPRESSION.md: the demotion is shared. A fresh instance
-// inherits the remaining identity deadline; an instance that still holds the
-// coding locally keeps using it until its own replay, and its renewals cannot
-// overwrite or extend the shared identity.
+// inherits the remaining identity deadline, including an already settled
+// instance. Requests cannot overwrite or extend the shared identity.
 func TestRegistrySharesIdentityDemotionAcrossInstances(t *testing.T) {
 	server, client := sharedTestRedis(t)
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
@@ -360,7 +329,10 @@ func TestRegistrySharesIdentityDemotionAcrossInstances(t *testing.T) {
 	deadline := now.Add(ambiguousIdentityRetryTTL)
 	now = now.Add(10 * time.Minute)
 	server.FastForward(10 * time.Minute)
-	resp, err = stale.Execute(accountID, newTestRequest(t, testBody()), compressedOK)
+	resp, err = stale.Execute(accountID, newTestRequest(t, testBody()), func(attempt *http.Request) (*http.Response, error) {
+		require.Empty(t, attempt.Header.Get("Content-Encoding"))
+		return okResponse("plain"), nil
+	})
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 	requireSharedAlgorithm(t, server, accountID, Algorithm(sharedIdentityValue))

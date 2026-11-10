@@ -5,7 +5,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -63,10 +62,10 @@ func TestRegistrySharesSettledAlgorithmAcrossInstances(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"br"}, sent)
 
-	// Once initialized, the hot path is memory-only and survives a Redis outage.
+	// Redis remains authoritative: an outage sends only this request plain.
 	server.Close()
 	_, err = second.Execute(accountID, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
-		require.Equal(t, "br", req.Header.Get("Content-Encoding"))
+		require.Empty(t, req.Header.Get("Content-Encoding"))
 		return okResponse("ok"), nil
 	})
 	require.NoError(t, err)
@@ -93,7 +92,8 @@ func TestRegistrySharedWritesSurviveRequestCancellation(t *testing.T) {
 	require.NoError(t, err)
 	requireSharedAlgorithm(t, server, accountID, AlgorithmZstd)
 
-	registry.deleteSharedAlgorithm(ctx, accountID, AlgorithmZstd)
+	snapshot := readRegistrySnapshot(t, registry, accountID)
+	registry.deleteSharedAlgorithm(ctx, accountID, AlgorithmZstd, snapshot)
 	require.False(t, server.Exists(sharedAlgorithmKey(accountID)))
 }
 
@@ -243,304 +243,6 @@ func TestRegistryDoesNotPersistExplicitlyRejectedIdentity(t *testing.T) {
 	require.False(t, server.Exists(sharedAlgorithmKey(accountID)))
 }
 
-func TestPersistSharedIdentityScriptPreservesCodingAndDeadline(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	const accountID int64 = 712
-	key := sharedAlgorithmKey(accountID)
-	run := func() {
-		t.Helper()
-		require.NoError(t, persistSharedIdentityScript.Run(context.Background(), client,
-			[]string{key, sharedInvalidationKey(accountID)}, ambiguousIdentityRetryTTL.Milliseconds()).Err())
-	}
-
-	run()
-	requireSharedAlgorithm(t, server, accountID, Algorithm(sharedIdentityValue))
-	require.Equal(t, ambiguousIdentityRetryTTL, server.TTL(key))
-
-	// Republishing the same identity does not turn its fixed TTL into a sliding
-	// expiration, even when the caller supplies a fresh 30-minute PX value.
-	server.FastForward(10 * time.Minute)
-	run()
-	require.Equal(t, 20*time.Minute, server.TTL(key))
-
-	// A coding negotiated by another instance always wins over late identity.
-	require.NoError(t, server.Set(key, string(AlgorithmBrotli)))
-	server.SetTTL(key, sharedAlgorithmTTL)
-	run()
-	requireSharedAlgorithm(t, server, accountID, AlgorithmBrotli)
-	require.Equal(t, sharedAlgorithmTTL, server.TTL(key))
-}
-
-func TestRegistrySharesAmbiguousIdentityAcrossInstancesUntilTTL(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	first := sharedTestRegistry(client)
-	second := sharedTestRegistry(client)
-	now := time.Date(2026, 11, 6, 22, 0, 0, 0, time.UTC)
-	first.nowFunc = func() time.Time { return now }
-	second.nowFunc = func() time.Time { return now }
-	const accountID int64 = 711
-	first.Sync(accountID, true, time.Time{})
-	second.Sync(accountID, true, time.Time{})
-
-	var firstAttempts []string
-	resp, err := first.Execute(accountID, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
-		encoding := req.Header.Get("Content-Encoding")
-		firstAttempts = append(firstAttempts, encoding)
-		if encoding == "" {
-			return okResponse("identity"), nil
-		}
-		return &http.Response{StatusCode: 400, Body: io.NopCloser(strings.NewReader(`{"detail":"Bad Request"}`))}, nil
-	})
-	require.NoError(t, err)
-	require.NoError(t, resp.Body.Close())
-	require.Equal(t, []string{"br", "zstd", "deflate", ""}, firstAttempts)
-	requireSharedAlgorithm(t, server, accountID, Algorithm(sharedIdentityValue))
-	require.Equal(t, ambiguousIdentityRetryTTL, server.TTL(sharedAlgorithmKey(accountID)))
-	require.Equal(t, AlgorithmNone, second.SettledAlgorithm(context.Background(), accountID))
-
-	// The second instance first reads the shared identity at minute 29. It must
-	// inherit only the remaining minute, not start a fresh 30-minute timer.
-	now = now.Add(29 * time.Minute)
-	server.FastForward(29 * time.Minute)
-	var secondAttempts []string
-	resp, err = second.Execute(accountID, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
-		secondAttempts = append(secondAttempts, req.Header.Get("Content-Encoding"))
-		require.Empty(t, req.Header.Get("Content-Encoding"))
-		return okResponse("identity"), nil
-	})
-	require.NoError(t, err)
-	require.NoError(t, resp.Body.Close())
-	require.Equal(t, []string{""}, secondAttempts)
-	require.Equal(t, time.Minute, server.TTL(sharedAlgorithmKey(accountID)), "identity reads never renew its TTL")
-
-	// At the shared expiry the second instance reopens candidates. Its success
-	// replaces identity with the ordinary six-hour coding result.
-	now = now.Add(time.Minute)
-	server.FastForward(time.Minute)
-	secondAttempts = nil
-	resp, err = second.Execute(accountID, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
-		secondAttempts = append(secondAttempts, req.Header.Get("Content-Encoding"))
-		require.Equal(t, "br", req.Header.Get("Content-Encoding"))
-		return okResponse("brotli-recovered"), nil
-	})
-	require.NoError(t, err)
-	require.NoError(t, resp.Body.Close())
-	require.Equal(t, []string{"br"}, secondAttempts)
-	requireSharedAlgorithm(t, server, accountID, AlgorithmBrotli)
-	require.Equal(t, sharedAlgorithmTTL, server.TTL(sharedAlgorithmKey(accountID)))
-}
-
-func TestRegistryDoesNotPersistAlgorithmAfterReset(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	registry := sharedTestRegistry(client)
-	const accountID int64 = 707
-	registry.Sync(accountID, true, time.Time{})
-	registry.Reset(context.Background(), accountID)
-
-	// Simulate a coded request that completed after the administrative reset.
-	registry.persistSharedAlgorithm(context.Background(), accountID, AlgorithmBrotli)
-	require.False(t, server.Exists(sharedAlgorithmKey(accountID)))
-}
-
-func TestRegistryDeleteSharedAlgorithmDoesNotRemoveDifferentCoding(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	registry := sharedTestRegistry(client)
-	const accountID int64 = 705
-	require.NoError(t, server.Set(sharedAlgorithmKey(accountID), "zstd"))
-
-	registry.deleteSharedAlgorithm(context.Background(), accountID, AlgorithmBrotli)
-	requireSharedAlgorithm(t, server, accountID, AlgorithmZstd)
-
-	registry.deleteSharedAlgorithm(context.Background(), accountID, AlgorithmZstd)
-	require.False(t, server.Exists(sharedAlgorithmKey(accountID)))
-}
-
-// settleTestState enables accountID and settles its local state on algorithm
-// without Execute, so refresh behavior is tested independently of the request path.
-func settleTestState(t *testing.T, registry *Registry, accountID int64, algorithm Algorithm) *state {
-	t.Helper()
-	registry.Sync(accountID, true, time.Time{})
-	negotiation := registry.existingSlot(accountID).currentState()
-	require.NotNil(t, negotiation)
-	negotiation.negotiationSucceeded(algorithm)
-	return negotiation
-}
-
-// docs/REQUEST_COMPRESSION.md: six-hour sliding TTL, refreshed only by requests.
-func TestRegistryRefreshSharedAlgorithmSlidesTTLAcrossRequests(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	registry := sharedTestRegistry(client)
-	const accountID int64 = 720
-	negotiation := settleTestState(t, registry, accountID, AlgorithmBrotli)
-	registry.persistSharedAlgorithm(context.Background(), accountID, AlgorithmBrotli)
-	key := sharedAlgorithmKey(accountID)
-	require.Equal(t, sharedAlgorithmTTL, server.TTL(key))
-
-	for i := 0; i < 3; i++ {
-		server.FastForward(5 * time.Hour)
-		require.True(t, server.Exists(key), "request %d", i)
-		registry.refreshSharedAlgorithm(context.Background(), accountID, negotiation)
-		require.Equal(t, sharedAlgorithmTTL, server.TTL(key))
-		requireSharedAlgorithm(t, server, accountID, AlgorithmBrotli)
-	}
-	// Without further requests the value finally expires after the full period.
-	server.FastForward(sharedAlgorithmTTL)
-	require.False(t, server.Exists(key))
-}
-
-func TestRegistryRefreshSharedAlgorithmMigratesLegacyKeyWithoutTTL(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	registry := sharedTestRegistry(client)
-	const accountID int64 = 721
-	key := sharedAlgorithmKey(accountID)
-	require.NoError(t, server.Set(key, "zstd"))
-	require.Zero(t, server.TTL(key))
-
-	registry.Sync(accountID, true, time.Time{})
-	negotiation := registry.existingSlot(accountID).currentState()
-	require.NoError(t, registry.hydrateShared(context.Background(), accountID, negotiation))
-	require.Equal(t, AlgorithmZstd, negotiation.settledAlgorithm())
-
-	registry.refreshSharedAlgorithm(context.Background(), accountID, negotiation)
-	requireSharedAlgorithm(t, server, accountID, AlgorithmZstd)
-	require.Equal(t, sharedAlgorithmTTL, server.TTL(key))
-}
-
-func TestRegistryRefreshSharedAlgorithmSurvivesCanceledContext(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	registry := sharedTestRegistry(client)
-	const accountID int64 = 722
-	negotiation := settleTestState(t, registry, accountID, AlgorithmDeflate)
-	registry.persistSharedAlgorithm(context.Background(), accountID, AlgorithmDeflate)
-	key := sharedAlgorithmKey(accountID)
-	server.SetTTL(key, time.Minute)
-
-	// A failed or canceled client request must still keep the probed coding.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	registry.refreshSharedAlgorithm(ctx, accountID, negotiation)
-	require.Equal(t, sharedAlgorithmTTL, server.TTL(key))
-	require.Equal(t, AlgorithmDeflate, negotiation.settledAlgorithm())
-}
-
-func TestRegistryRefreshSharedAlgorithmRestoresMissingKey(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	registry := sharedTestRegistry(client)
-	const accountID int64 = 723
-	negotiation := settleTestState(t, registry, accountID, AlgorithmZstd)
-	key := sharedAlgorithmKey(accountID)
-	require.False(t, server.Exists(key), "TTL expiry or Redis restart")
-
-	registry.refreshSharedAlgorithm(context.Background(), accountID, negotiation)
-	requireSharedAlgorithm(t, server, accountID, AlgorithmZstd)
-	require.Equal(t, sharedAlgorithmTTL, server.TTL(key))
-	require.Equal(t, AlgorithmZstd, registry.SettledAlgorithm(context.Background(), accountID))
-}
-
-func TestRegistryRefreshSharedAlgorithmDoesNotOverwriteOrExtendDifferentCoding(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	registry := sharedTestRegistry(client)
-	const accountID int64 = 724
-	negotiation := settleTestState(t, registry, accountID, AlgorithmBrotli)
-	key := sharedAlgorithmKey(accountID)
-	require.NoError(t, server.Set(key, "zstd"))
-	server.SetTTL(key, time.Hour)
-
-	registry.refreshSharedAlgorithm(context.Background(), accountID, negotiation)
-	requireSharedAlgorithm(t, server, accountID, AlgorithmZstd)
-	require.Equal(t, time.Hour, server.TTL(key))
-	require.Equal(t, AlgorithmBrotli, negotiation.settledAlgorithm(), "local state is not changed by refresh")
-}
-
-func TestRegistryRefreshSharedAlgorithmDoesNotResurrectAfterResetOrDisable(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	registry := sharedTestRegistry(client)
-	const accountID int64 = 725
-	key := sharedAlgorithmKey(accountID)
-
-	stale := settleTestState(t, registry, accountID, AlgorithmBrotli)
-	registry.persistSharedAlgorithm(context.Background(), accountID, AlgorithmBrotli)
-	registry.Reset(context.Background(), accountID)
-	require.False(t, server.Exists(key))
-	registry.refreshSharedAlgorithm(context.Background(), accountID, stale)
-	require.False(t, server.Exists(key), "reset without a slot")
-
-	// A fresh state for the same account is a different negotiation: the old
-	// one must not republish its coding even when the slot exists again.
-	registry.Sync(accountID, true, time.Time{})
-	registry.refreshSharedAlgorithm(context.Background(), accountID, stale)
-	require.False(t, server.Exists(key), "reset then re-enable")
-
-	disabled := settleTestState(t, registry, accountID, AlgorithmZstd)
-	registry.persistSharedAlgorithm(context.Background(), accountID, AlgorithmZstd)
-	registry.Sync(accountID, false, time.Time{})
-	require.False(t, server.Exists(key))
-	registry.refreshSharedAlgorithm(context.Background(), accountID, disabled)
-	require.False(t, server.Exists(key), "disabled")
-	registry.Sync(accountID, true, time.Time{})
-	registry.refreshSharedAlgorithm(context.Background(), accountID, disabled)
-	require.False(t, server.Exists(key), "disabled then re-enabled")
-}
-
-func TestRegistryRefreshSharedAlgorithmIgnoresUnsettledState(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	registry := sharedTestRegistry(client)
-	const accountID int64 = 726
-	registry.Sync(accountID, true, time.Time{})
-	negotiation := registry.existingSlot(accountID).currentState()
-	registry.refreshSharedAlgorithm(context.Background(), accountID, negotiation)
-	require.False(t, server.Exists(sharedAlgorithmKey(accountID)))
-}
-
-func TestRegistrySettledAlgorithmReadDoesNotRenewTTL(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	registry := sharedTestRegistry(client)
-	const accountID int64 = 727
-	settleTestState(t, registry, accountID, AlgorithmBrotli)
-	registry.persistSharedAlgorithm(context.Background(), accountID, AlgorithmBrotli)
-	key := sharedAlgorithmKey(accountID)
-	server.SetTTL(key, time.Hour)
-
-	require.Equal(t, AlgorithmBrotli, registry.SettledAlgorithm(context.Background(), accountID))
-	require.Equal(t, time.Hour, server.TTL(key), "administrative reads must not keep a coding alive")
-}
-
-func TestRegistryRefreshSharedAlgorithmFailureKeepsLocalNegotiation(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	registry := sharedTestRegistry(client)
-	const accountID int64 = 728
-	negotiation := settleTestState(t, registry, accountID, AlgorithmBrotli)
-	server.Close()
-
-	registry.refreshSharedAlgorithm(context.Background(), accountID, negotiation)
-	require.Equal(t, AlgorithmBrotli, negotiation.settledAlgorithm())
-	require.Same(t, negotiation, registry.existingSlot(accountID).currentState())
-}
-
-func TestRegistryRefreshSharedAlgorithmWithoutRedisIsNoop(t *testing.T) {
-	registry := NewRegistry()
-	const accountID int64 = 729
-	negotiation := settleTestState(t, registry, accountID, AlgorithmBrotli)
-	require.NotPanics(t, func() {
-		registry.refreshSharedAlgorithm(context.Background(), accountID, negotiation)
-		registry.refreshSharedAlgorithm(nil, accountID, nil) //nolint:staticcheck // nil context is tolerated
-		(*Registry)(nil).refreshSharedAlgorithm(context.Background(), accountID, negotiation)
-	})
-	require.Equal(t, AlgorithmBrotli, negotiation.settledAlgorithm())
-}
-
-func TestClaimSharedRefreshLogRateLimitsPerAccount(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	const accountID int64 = 730_000_001
-	// The limiter is process-global; make repeated runs independent.
-	sharedRefreshLogTimes.Delete(accountID)
-	sharedRefreshLogTimes.Delete(accountID + 1)
-	require.True(t, claimSharedRefreshLog(accountID, now))
-	require.False(t, claimSharedRefreshLog(accountID, now.Add(sharedRefreshLogInterval-time.Second)))
-	require.True(t, claimSharedRefreshLog(accountID+1, now))
-	require.True(t, claimSharedRefreshLog(accountID, now.Add(sharedRefreshLogInterval)))
-}
-
 // delayProxy forwards TCP traffic to miniredis and can hold replies back while
 // still delivering commands, which models a slow or stalled Redis that go-redis
 // can only escape through its socket deadlines.
@@ -645,76 +347,559 @@ func elapsed(fn func()) time.Duration {
 	return time.Since(start)
 }
 
-func TestRegistryRefreshSharedAlgorithmDoesNotQueueConcurrentRequests(t *testing.T) {
-	server, proxy, client := delayedSharedTestRedis(t)
-	registry := sharedTestRegistry(client)
-	const accountID, otherID int64 = 740, 741
-	negotiation := settleTestState(t, registry, accountID, AlgorithmBrotli)
-	registry.persistSharedAlgorithm(context.Background(), accountID, AlgorithmBrotli)
-	key := sharedAlgorithmKey(accountID)
-	server.SetTTL(key, time.Hour)
-
-	proxy.blocked.Store(true)
-	since := proxy.upstream.Load()
-	first := make(chan time.Duration, 1)
-	go func() {
-		first <- elapsed(func() { registry.refreshSharedAlgorithm(context.Background(), accountID, negotiation) })
-	}()
-	proxy.waitForUpstream(t, since)
-
-	// While the first renewal waits for Redis, same-account requests neither
-	// queue behind it nor are blocked on the slot or state locks.
-	var wg sync.WaitGroup
-	slowest := atomic.Int64{}
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			d := elapsed(func() {
-				registry.refreshSharedAlgorithm(context.Background(), accountID, negotiation)
-				require.True(t, registry.Enabled(accountID))
-				require.Same(t, negotiation, registry.existingSlot(accountID).currentState())
-				_, err := registry.Execute(accountID, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
-					require.Equal(t, "br", req.Header.Get("Content-Encoding"))
-					return okResponse("ok"), nil
-				})
-				require.NoError(t, err)
-			})
-			for {
-				old := slowest.Load()
-				if int64(d) <= old || slowest.CompareAndSwap(old, int64(d)) {
-					return
-				}
-			}
-		}()
-	}
-	wg.Wait()
-	require.Less(t, time.Duration(slowest.Load()), sharedRefreshTimeout/2)
-	select {
-	case <-first:
-		t.Fatal("first renewal should still be waiting for Redis")
-	default:
-	}
-
-	// The stalled renewal is bounded by the short refresh timeout and fails open.
-	d := <-first
-	require.GreaterOrEqual(t, d, sharedRefreshTimeout/2)
-	require.Less(t, d, 5*sharedRefreshTimeout)
-	require.Equal(t, AlgorithmBrotli, negotiation.settledAlgorithm())
-	require.Same(t, negotiation, registry.existingSlot(accountID).currentState())
-
-	// Non-concurrent requests still renew every time once Redis recovers, and
-	// another account never shared the stalled lock.
-	proxy.blocked.Store(false)
-	other := settleTestState(t, registry, otherID, AlgorithmZstd)
-	server.SetTTL(key, time.Hour)
-	registry.refreshSharedAlgorithm(context.Background(), accountID, negotiation)
-	require.Equal(t, sharedAlgorithmTTL, server.TTL(key))
-	registry.refreshSharedAlgorithm(context.Background(), otherID, other)
-	require.Equal(t, sharedAlgorithmTTL, server.TTL(sharedAlgorithmKey(otherID)))
+// readRegistrySnapshot is a request boundary without an upstream attempt.
+func readRegistrySnapshot(t *testing.T, registry *Registry, accountID int64) *sharedSnapshot {
+	t.Helper()
+	registry.Sync(accountID, true, time.Time{})
+	snapshot, err := registry.syncShared(context.Background(), accountID, registry.existingSlot(accountID).currentState())
+	require.NoError(t, err)
+	return snapshot
 }
 
-func TestRegistryResetAndDisableOrderAfterInFlightRefresh(t *testing.T) {
+func publishTestAlgorithm(t *testing.T, registry *Registry, accountID int64, algorithm Algorithm) *state {
+	t.Helper()
+	snapshot := readRegistrySnapshot(t, registry, accountID)
+	negotiation := registry.existingSlot(accountID).currentState()
+	negotiation.negotiationSucceeded(algorithm)
+	registry.persistSharedAlgorithm(context.Background(), accountID, algorithm, snapshot)
+	return negotiation
+}
+
+func publishTestIdentity(t *testing.T, registry *Registry, accountID int64, expected *sharedSnapshot, replaceable Algorithm) {
+	t.Helper()
+	negotiation := registry.existingSlot(accountID).currentState()
+	retryAt := registry.now().Add(ambiguousIdentityRetryTTL)
+	negotiation.pinIdentityUntil(retryAt)
+	registry.persistSharedIdentity(context.Background(), accountID, negotiation, retryAt, replaceable, expected)
+}
+
+func TestRegistrySharedCodingRequestsSlideTTLIncludingIneligibleBodies(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	registry := sharedTestRegistry(client)
+	const id int64 = 720
+	publishTestAlgorithm(t, registry, id, AlgorithmZstd)
+	key := sharedAlgorithmKey(id)
+	for _, body := range [][]byte{testBody(), []byte("small")} {
+		server.FastForward(5 * time.Hour)
+		resp, err := registry.Execute(id, newTestRequest(t, body), func(req *http.Request) (*http.Response, error) {
+			if len(body) >= int(MinCompressibleBodyBytes) {
+				require.Equal(t, "zstd", req.Header.Get("Content-Encoding"))
+			}
+			return okResponse("ok"), nil
+		})
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		require.Equal(t, sharedAlgorithmTTL, server.TTL(key))
+		require.Equal(t, sharedAlgorithmTTL, server.TTL(sharedRevisionKey(id)))
+	}
+	server.SetTTL(key, time.Hour)
+	require.Equal(t, AlgorithmZstd, registry.SettledAlgorithm(context.Background(), id))
+	require.Equal(t, time.Hour, server.TTL(key), "administrative reads do not renew")
+}
+
+func TestRegistryMigratesLegacySharedValues(t *testing.T) {
+	for _, value := range []string{"zstd", "identity"} {
+		t.Run(value, func(t *testing.T) {
+			server, client := sharedTestRedis(t)
+			registry := sharedTestRegistry(client)
+			const id int64 = 721
+			require.NoError(t, server.Set(sharedAlgorithmKey(id), value))
+			snapshot := readRegistrySnapshot(t, registry, id)
+			require.NotEmpty(t, snapshot.revision)
+			if value == "zstd" {
+				require.Equal(t, sharedAlgorithmTTL, server.TTL(sharedAlgorithmKey(id)))
+				require.Equal(t, AlgorithmZstd, snapshot.owner.settledAlgorithm())
+			} else {
+				require.False(t, server.Exists(sharedAlgorithmKey(id)), "nonexpiring identity cannot disable recovery")
+				work, owns := snapshot.owner.begin(registry.now())
+				require.True(t, owns)
+				require.Equal(t, TrialOrder, work)
+			}
+		})
+	}
+}
+
+func TestSharedIdentityCASPreservesRemainingPTTLAndOtherCoding(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	registry := sharedTestRegistry(client)
+	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	registry.nowFunc = func() time.Time { return now }
+	const id int64 = 722
+	publishTestAlgorithm(t, registry, id, AlgorithmZstd)
+	stale := readRegistrySnapshot(t, registry, id)
+	publishTestIdentity(t, registry, id, stale, AlgorithmZstd)
+	requireSharedAlgorithm(t, server, id, Algorithm(sharedIdentityValue))
+	require.Equal(t, ambiguousIdentityRetryTTL, server.TTL(sharedAlgorithmKey(id)))
+	now = now.Add(20 * time.Minute)
+	server.FastForward(20 * time.Minute)
+	// The obsolete request's fresh local deadline must be replaced by Redis's
+	// remaining 10 minutes, without a second non-atomic GET/PTTL round trip.
+	publishTestIdentity(t, registry, id, stale, AlgorithmZstd)
+	require.Equal(t, 10*time.Minute, server.TTL(sharedAlgorithmKey(id)))
+	deadline, ok := stale.owner.identityRetry()
+	require.True(t, ok)
+	require.Equal(t, now.Add(10*time.Minute), deadline)
+	// Neither a slow coding success nor another identity result can replace it.
+	stale.owner.negotiationSucceeded(AlgorithmBrotli)
+	registry.persistSharedAlgorithm(context.Background(), id, AlgorithmBrotli, stale)
+	requireSharedAlgorithm(t, server, id, Algorithm(sharedIdentityValue))
+	require.Equal(t, 10*time.Minute, server.TTL(sharedAlgorithmKey(id)))
+	require.Equal(t, AlgorithmNone, stale.owner.settledAlgorithm())
+	// After expiry a fresh trial can publish a different coding. Old responses
+	// cannot overwrite it or change its TTL, including a matching-coding ABA.
+	now = now.Add(10 * time.Minute)
+	server.FastForward(10 * time.Minute)
+	publishTestAlgorithm(t, registry, id, AlgorithmZstd)
+	server.SetTTL(sharedAlgorithmKey(id), time.Hour)
+	publishTestIdentity(t, registry, id, stale, AlgorithmZstd)
+	requireSharedAlgorithm(t, server, id, AlgorithmZstd)
+	require.Equal(t, time.Hour, server.TTL(sharedAlgorithmKey(id)))
+	require.Equal(t, AlgorithmZstd, stale.owner.settledAlgorithm())
+}
+
+func TestSharedExpiredIdentityCannotBeRecreatedByStaleReplayOrSuccess(t *testing.T) {
+	for _, expire := range []string{"identity", "all-keys", "flush"} {
+		t.Run(expire, func(t *testing.T) {
+			server, client := sharedTestRedis(t)
+			registry := sharedTestRegistry(client)
+			const id int64 = 723
+			publishTestAlgorithm(t, registry, id, AlgorithmBrotli)
+			stale := readRegistrySnapshot(t, registry, id)
+			publishTestIdentity(t, registry, id, stale, AlgorithmBrotli)
+			switch expire {
+			case "identity":
+				server.FastForward(ambiguousIdentityRetryTTL)
+			case "all-keys":
+				server.FastForward(sharedInvalidationTTL)
+			case "flush":
+				server.FlushAll()
+			}
+			require.False(t, server.Exists(sharedAlgorithmKey(id)))
+			publishTestIdentity(t, registry, id, stale, AlgorithmBrotli)
+			require.False(t, server.Exists(sharedAlgorithmKey(id)), "old replay cannot recreate identity")
+			stale.owner.negotiationSucceeded(AlgorithmBrotli)
+			registry.persistSharedAlgorithm(context.Background(), id, AlgorithmBrotli, stale)
+			require.False(t, server.Exists(sharedAlgorithmKey(id)), "old success cannot recreate coding")
+			fresh := readRegistrySnapshot(t, registry, id)
+			require.NotEqual(t, stale.revision, fresh.revision)
+			work, owns := fresh.owner.begin(registry.now())
+			require.True(t, owns)
+			require.Equal(t, TrialOrder, work)
+			fresh.owner.negotiationSucceeded(AlgorithmZstd)
+			registry.persistSharedAlgorithm(context.Background(), id, AlgorithmZstd, fresh)
+			requireSharedAlgorithm(t, server, id, AlgorithmZstd)
+		})
+	}
+}
+
+func TestSharedMissingCodingCannotBeDemotedByOldReplay(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	registry := sharedTestRegistry(client)
+	const id int64 = 724
+	publishTestAlgorithm(t, registry, id, AlgorithmBrotli)
+	before := readRegistrySnapshot(t, registry, id)
+	server.Del(sharedAlgorithmKey(id))
+	publishTestIdentity(t, registry, id, before, AlgorithmBrotli)
+	require.False(t, server.Exists(sharedAlgorithmKey(id)))
+	// Only a fresh initial negotiation from the missing snapshot may publish.
+	fresh := readRegistrySnapshot(t, registry, id)
+	publishTestIdentity(t, registry, id, fresh, AlgorithmNone)
+	requireSharedAlgorithm(t, server, id, Algorithm(sharedIdentityValue))
+}
+
+func TestSharedInitialIdentityCanPublishAndRecoverAtRedisExpiry(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	registry := sharedTestRegistry(client)
+	const id int64 = 725
+	registry.Sync(id, true, time.Time{})
+	var attempts []string
+	resp, err := registry.Execute(id, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+		coding := req.Header.Get("Content-Encoding")
+		attempts = append(attempts, coding)
+		if coding != "" {
+			return codedFailure(400, `{"detail":"Bad Request"}`), nil
+		}
+		return okResponse("plain"), nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, []string{"br", "zstd", "deflate", ""}, attempts)
+	require.Equal(t, ambiguousIdentityRetryTTL, server.TTL(sharedAlgorithmKey(id)))
+	// Local wall time passing does not expire a live Redis identity.
+	registry.nowFunc = func() time.Time { return time.Now().Add(24 * time.Hour) }
+	attempts = nil
+	resp, err = registry.Execute(id, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+		attempts = append(attempts, req.Header.Get("Content-Encoding"))
+		return okResponse("ok"), nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, []string{""}, attempts)
+	server.FastForward(ambiguousIdentityRetryTTL)
+	attempts = nil
+	resp, err = registry.Execute(id, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+		attempts = append(attempts, req.Header.Get("Content-Encoding"))
+		return okResponse("ok"), nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, []string{"br"}, attempts)
+}
+
+func TestSharedResetFencesInflightWritesAcrossInstances(t *testing.T) {
+	for _, mutation := range []string{"identity", "success", "retire"} {
+		t.Run(mutation, func(t *testing.T) {
+			server, client := sharedTestRedis(t)
+			a, b := sharedTestRegistry(client), sharedTestRegistry(client)
+			const id int64 = 726
+			publishTestAlgorithm(t, a, id, AlgorithmBrotli)
+			stale := readRegistrySnapshot(t, b, id)
+			a.Reset(context.Background(), id)
+			resetRevision, err := server.Get(sharedRevisionKey(id))
+			require.NoError(t, err)
+			switch mutation {
+			case "identity":
+				publishTestIdentity(t, b, id, stale, AlgorithmBrotli)
+			case "success":
+				stale.owner.negotiationSucceeded(AlgorithmZstd)
+				b.persistSharedAlgorithm(context.Background(), id, AlgorithmZstd, stale)
+			case "retire":
+				b.deleteSharedAlgorithm(context.Background(), id, AlgorithmBrotli, stale)
+			}
+			require.False(t, server.Exists(sharedAlgorithmKey(id)))
+			require.True(t, server.Exists(sharedInvalidationKey(id)))
+			current, err := server.Get(sharedRevisionKey(id))
+			require.NoError(t, err)
+			require.Equal(t, resetRevision, current)
+			// A genuine post-reset probe can still publish and clear the marker.
+			publishTestAlgorithm(t, a, id, AlgorithmZstd)
+			requireSharedAlgorithm(t, server, id, AlgorithmZstd)
+			require.False(t, server.Exists(sharedInvalidationKey(id)))
+		})
+	}
+}
+
+func TestSharedLocalResetRejectsDetachedStateAfterReenable(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	registry := sharedTestRegistry(client)
+	const id int64 = 727
+	publishTestAlgorithm(t, registry, id, AlgorithmBrotli)
+	stale := readRegistrySnapshot(t, registry, id)
+	registry.Reset(context.Background(), id)
+	publishTestAlgorithm(t, registry, id, AlgorithmBrotli)
+	server.SetTTL(sharedAlgorithmKey(id), time.Hour)
+	stale.owner.negotiationSucceeded(AlgorithmBrotli)
+	registry.persistSharedAlgorithm(context.Background(), id, AlgorithmBrotli, stale)
+	registry.deleteSharedAlgorithm(context.Background(), id, AlgorithmBrotli, stale)
+	requireSharedAlgorithm(t, server, id, AlgorithmBrotli)
+	require.Equal(t, time.Hour, server.TTL(sharedAlgorithmKey(id)))
+}
+
+func TestSharedConcurrentResetAndPublicationRemainFenced(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	a, b := sharedTestRegistry(client), sharedTestRegistry(client)
+	const id int64 = 728
+	for i := 0; i < 20; i++ {
+		publishTestAlgorithm(t, a, id, AlgorithmBrotli)
+		stale := readRegistrySnapshot(t, b, id)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); a.Reset(context.Background(), id) }()
+		go func() { defer wg.Done(); publishTestIdentity(t, b, id, stale, AlgorithmBrotli) }()
+		wg.Wait()
+		require.False(t, server.Exists(sharedAlgorithmKey(id)))
+	}
+}
+
+func TestSharedDemotionSurvivesConcurrentLocalReadBeforePublication(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	registry := sharedTestRegistry(client)
+	const id int64 = 729
+	publishTestAlgorithm(t, registry, id, AlgorithmBrotli)
+	before := readRegistrySnapshot(t, registry, id)
+	retryAt := registry.now().Add(ambiguousIdentityRetryTTL)
+	require.True(t, before.owner.demoteSettled(AlgorithmBrotli, retryAt))
+	readRegistrySnapshot(t, registry, id) // unchanged snapshot preserves pending demotion
+	require.Equal(t, AlgorithmNone, before.owner.settledAlgorithm())
+	registry.persistSharedIdentity(context.Background(), id, before.owner, retryAt, AlgorithmBrotli, before)
+	requireSharedAlgorithm(t, server, id, Algorithm(sharedIdentityValue))
+	require.Equal(t, AlgorithmNone, before.owner.settledAlgorithm())
+}
+
+func TestSharedReadFailureSendsPlainAndRecoveryUsesCurrentRedisState(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	registry := sharedTestRegistry(client)
+	const id int64 = 730
+	publishTestAlgorithm(t, registry, id, AlgorithmBrotli)
+	server.SetError("ERR redis unavailable")
+	for i := 0; i < 2; i++ {
+		resp, err := registry.Execute(id, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+			require.Empty(t, req.Header.Get("Content-Encoding"))
+			return okResponse("plain"), nil
+		})
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+	}
+	server.SetError("")
+	other := sharedTestRegistry(client)
+	publishTestAlgorithm(t, other, id, AlgorithmZstd)
+	resp, err := registry.Execute(id, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, "zstd", req.Header.Get("Content-Encoding"))
+		return okResponse("compressed"), nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+}
+
+func TestSharedIdentityWriteFailureDoesNotKeepIndependentCooldown(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	registry := sharedTestRegistry(client)
+	const id int64 = 731
+	publishTestAlgorithm(t, registry, id, AlgorithmZstd)
+	var attempts []string
+	resp, err := registry.Execute(id, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+		coding := req.Header.Get("Content-Encoding")
+		attempts = append(attempts, coding)
+		if coding != "" {
+			return codedFailure(400, `{"detail":"Bad Request"}`), nil
+		}
+		server.SetError("ERR write unavailable")
+		return okResponse("plain"), nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, []string{"zstd", ""}, attempts)
+	_, pinned := registry.existingSlot(id).currentState().identityRetry()
+	require.False(t, pinned)
+	server.SetError("")
+	requireSharedAlgorithm(t, server, id, AlgorithmZstd)
+	// There is no process-local 30-minute delay after Redis recovers.
+	resp, err = registry.Execute(id, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, "zstd", req.Header.Get("Content-Encoding"))
+		return okResponse("compressed"), nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+}
+
+func TestSharedConcurrentReadsCoalesceAndRemainBounded(t *testing.T) {
+	for _, healthy := range []bool{true, false} {
+		t.Run(map[bool]string{true: "healthy", false: "outage"}[healthy], func(t *testing.T) {
+			server, proxy, client := delayedSharedTestRedis(t)
+			registry := sharedTestRegistry(client)
+			const id int64 = 732
+			publishTestAlgorithm(t, registry, id, AlgorithmBrotli)
+			warmCount := server.CommandCount()
+			readRegistrySnapshot(t, registry, id)
+			commandsPerRead := server.CommandCount() - warmCount
+			proxy.blocked.Store(true)
+			since := proxy.upstream.Load()
+			before := server.CommandCount()
+			done := make(chan time.Duration, 21)
+			run := func() {
+				done <- elapsed(func() {
+					resp, err := registry.Execute(id, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+						if healthy {
+							require.Equal(t, "br", req.Header.Get("Content-Encoding"))
+						} else {
+							require.Empty(t, req.Header.Get("Content-Encoding"))
+						}
+						return okResponse("ok"), nil
+					})
+					require.NoError(t, err)
+					require.NoError(t, resp.Body.Close())
+				})
+			}
+			go run()
+			proxy.waitForUpstream(t, since)
+			for i := 0; i < 20; i++ {
+				go run()
+			}
+			// Hold the response until the burst joins the outstanding read.
+			time.Sleep(40 * time.Millisecond)
+			if healthy {
+				proxy.blocked.Store(false)
+			}
+			for i := 0; i < 21; i++ {
+				select {
+				case d := <-done:
+					require.Less(t, d, 5*sharedRefreshTimeout)
+				case <-time.After(5 * sharedRefreshTimeout):
+					t.Fatal("request queued behind stalled shared reads")
+				}
+			}
+			if healthy {
+				require.Equal(t, commandsPerRead, server.CommandCount()-before, "one atomic Redis read serves this healthy burst")
+			}
+			proxy.blocked.Store(false)
+			readRegistrySnapshot(t, registry, id)
+			require.Equal(t, AlgorithmBrotli, registry.existingSlot(id).currentState().settledAlgorithm())
+		})
+	}
+}
+
+func TestSharedRevisionAndResetMarkerAreBounded(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	registry := sharedTestRegistry(client)
+	const id int64 = 733
+	registry.Reset(context.Background(), id)
+	require.Equal(t, sharedInvalidationTTL, server.TTL(sharedInvalidationKey(id)))
+	require.Equal(t, sharedInvalidationTTL, server.TTL(sharedRevisionKey(id)))
+	server.FastForward(sharedInvalidationTTL)
+	require.Empty(t, server.Keys())
+}
+
+func TestClaimSharedRefreshLogRateLimitsPerAccount(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	const id int64 = 730_000_001
+	sharedRefreshLogTimes.Delete(id)
+	sharedRefreshLogTimes.Delete(id + 1)
+	require.True(t, claimSharedRefreshLog(id, now))
+	require.False(t, claimSharedRefreshLog(id, now.Add(sharedRefreshLogInterval-time.Second)))
+	require.True(t, claimSharedRefreshLog(id+1, now))
+	require.True(t, claimSharedRefreshLog(id, now.Add(sharedRefreshLogInterval)))
+}
+
+// settleTestState bypasses shared publication for isolated logging/state tests.
+func settleTestState(t *testing.T, registry *Registry, accountID int64, algorithm Algorithm) *state {
+	t.Helper()
+	registry.Sync(accountID, true, time.Time{})
+	negotiation := registry.existingSlot(accountID).currentState()
+	require.NotNil(t, negotiation)
+	negotiation.negotiationSucceeded(algorithm)
+	return negotiation
+}
+
+func TestSharedResetFencesStaleLocalExplicitRejections(t *testing.T) {
+	_, client := sharedTestRedis(t)
+	registry, other := sharedTestRegistry(client), sharedTestRegistry(client)
+	const id int64 = 734
+	registry.Sync(id, true, time.Time{})
+	reset := false
+	resp, err := registry.Execute(id, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+		if !reset {
+			reset = true
+			other.Reset(context.Background(), id)
+			// The same state pointer observes the newer revision while the old
+			// initial trial is still running. A tiny body starts no new trial.
+			plain, err := registry.Execute(id, newTestRequest(t, []byte("small")), func(req *http.Request) (*http.Response, error) {
+				require.Empty(t, req.Header.Get("Content-Encoding"))
+				return okResponse("plain"), nil
+			})
+			require.NoError(t, err)
+			require.NoError(t, plain.Body.Close())
+		}
+		if req.Header.Get("Content-Encoding") != "" {
+			return rejectionResponse("unsupported content encoding"), nil
+		}
+		return okResponse("plain"), nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	var attempts []string
+	resp, err = registry.Execute(id, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+		attempts = append(attempts, req.Header.Get("Content-Encoding"))
+		return okResponse("new trial"), nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, []string{"br"}, attempts, "old explicit failures must not permanently pin the new generation")
+}
+
+func TestSharedSnapshotFencesEveryLocalStateTransition(t *testing.T) {
+	for name, change := range map[string]func(*state, *sharedSnapshot){
+		"success": func(s *state, old *sharedSnapshot) { s.negotiationSucceeded(AlgorithmDeflate, old) },
+		"candidate failure": func(s *state, old *sharedSnapshot) {
+			for _, coding := range TrialOrder {
+				s.negotiationCandidateFailed(coding, old)
+			}
+		},
+		"abort":         func(s *state, old *sharedSnapshot) { s.abortNegotiation(old) },
+		"pin":           func(s *state, old *sharedSnapshot) { s.pinIdentity(old) },
+		"temporary pin": func(s *state, old *sharedSnapshot) { s.pinIdentityUntil(time.Now().Add(time.Hour), old) },
+		"retire":        func(s *state, old *sharedSnapshot) { s.retireSettled(AlgorithmBrotli, old) },
+		"demote":        func(s *state, old *sharedSnapshot) { s.demoteSettled(AlgorithmBrotli, time.Now().Add(time.Hour), old) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newState()
+			old := &sharedSnapshot{owner: s, revision: "old"}
+			s.applyShared(old)
+			_, owns := s.begin(time.Now(), old)
+			require.True(t, owns)
+			fresh := &sharedSnapshot{owner: s, revision: "new"}
+			s.applyShared(fresh)
+			_, owns = s.begin(time.Now(), fresh)
+			require.True(t, owns)
+			change(s, old)
+			s.mu.Lock()
+			require.True(t, s.negotiating, "old completion must not release the new owner")
+			require.False(t, s.tested)
+			require.Equal(t, AlgorithmNone, s.current)
+			require.Equal(t, TrialOrder, s.remaining)
+			s.mu.Unlock()
+			work, owns := s.begin(time.Now(), old)
+			require.Empty(t, work)
+			require.False(t, owns)
+		})
+	}
+}
+
+func TestSharedUnchangedSnapshotPreservesRetirementOwner(t *testing.T) {
+	_, client := sharedTestRedis(t)
+	registry := sharedTestRegistry(client)
+	const id int64 = 735
+	publishTestAlgorithm(t, registry, id, AlgorithmBrotli)
+	before := readRegistrySnapshot(t, registry, id)
+	work, owns := before.owner.retireSettled(AlgorithmBrotli, before)
+	require.True(t, owns)
+	require.Equal(t, []Algorithm{AlgorithmZstd, AlgorithmDeflate}, work)
+	readRegistrySnapshot(t, registry, id)
+	before.owner.mu.Lock()
+	require.True(t, before.owner.negotiating)
+	require.Equal(t, AlgorithmNone, before.owner.current)
+	require.Equal(t, work, before.owner.remaining)
+	before.owner.mu.Unlock()
+	registry.deleteSharedAlgorithm(context.Background(), id, AlgorithmBrotli, before)
+	readRegistrySnapshot(t, registry, id)
+	before.owner.mu.Lock()
+	require.True(t, before.owner.negotiating)
+	require.Equal(t, work, before.owner.remaining)
+	before.owner.mu.Unlock()
+	before.owner.negotiationSucceeded(AlgorithmZstd, before)
+	registry.persistSharedAlgorithm(context.Background(), id, AlgorithmZstd, before)
+	require.Equal(t, AlgorithmZstd, before.owner.settledAlgorithm())
+}
+
+func TestSharedFailedStaleWriteDoesNotDiscardNewTrialOwner(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	registry, other := sharedTestRegistry(client), sharedTestRegistry(client)
+	const id int64 = 736
+	stale := readRegistrySnapshot(t, registry, id)
+	other.Reset(context.Background(), id)
+	fresh := readRegistrySnapshot(t, registry, id)
+	_, owns := fresh.owner.begin(registry.now(), fresh)
+	require.True(t, owns)
+	server.SetError("ERR write unavailable")
+	registry.persistSharedAlgorithm(context.Background(), id, AlgorithmBrotli, stale)
+	fresh.owner.mu.Lock()
+	require.True(t, fresh.owner.negotiating, "failed old publication cannot release the new owner")
+	require.Equal(t, fresh.revision, fresh.owner.sharedRevision)
+	fresh.owner.mu.Unlock()
+}
+
+func TestRegistrySettledAlgorithmReadDoesNotRenewTTL(t *testing.T) {
+	server, client := sharedTestRedis(t)
+	registry := sharedTestRegistry(client)
+	const id int64 = 737
+	publishTestAlgorithm(t, registry, id, AlgorithmZstd)
+	server.SetTTL(sharedAlgorithmKey(id), time.Hour)
+	server.SetTTL(sharedRevisionKey(id), time.Hour)
+	require.Equal(t, AlgorithmZstd, registry.SettledAlgorithm(context.Background(), id))
+	require.Equal(t, time.Hour, server.TTL(sharedAlgorithmKey(id)))
+	require.Equal(t, time.Hour, server.TTL(sharedRevisionKey(id)))
+}
+
+func TestSharedResetAndDisableOrderAfterInFlightRead(t *testing.T) {
 	for name, clear := range map[string]func(*Registry, int64){
 		"reset":   func(r *Registry, id int64) { r.Reset(context.Background(), id) },
 		"disable": func(r *Registry, id int64) { r.Sync(id, false, time.Time{}) },
@@ -722,241 +907,120 @@ func TestRegistryResetAndDisableOrderAfterInFlightRefresh(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			server, proxy, client := delayedSharedTestRedis(t)
 			registry := sharedTestRegistry(client)
-			const accountID, otherID int64 = 742, 743
-			negotiation := settleTestState(t, registry, accountID, AlgorithmBrotli)
-			registry.persistSharedAlgorithm(context.Background(), accountID, AlgorithmBrotli)
-			key := sharedAlgorithmKey(accountID)
-			server.Del(key)
-
+			const id, otherID int64 = 738, 739
+			publishTestAlgorithm(t, registry, id, AlgorithmBrotli)
+			stale := registry.existingSlot(id).currentState()
 			proxy.blocked.Store(true)
 			since := proxy.upstream.Load()
-			refreshed := make(chan struct{})
+			readDone := make(chan struct{})
 			go func() {
-				defer close(refreshed)
-				registry.refreshSharedAlgorithm(context.Background(), accountID, negotiation)
+				defer close(readDone)
+				_, err := registry.syncShared(context.Background(), id, stale)
+				require.ErrorIs(t, err, errSharedStateBusy)
 			}()
 			proxy.waitForUpstream(t, since)
-
-			cleared := make(chan struct{})
-			go func() {
-				defer close(cleared)
-				clear(registry, accountID)
-			}()
-			// The local transition is immediate; only the Redis delete waits.
-			require.Eventually(t, func() bool { return !registry.Enabled(accountID) }, time.Second, time.Millisecond)
+			clearDone := make(chan struct{})
+			go func() { defer close(clearDone); clear(registry, id) }()
+			require.Eventually(t, func() bool { return !registry.Enabled(id) }, time.Second, time.Millisecond)
 			select {
-			case <-cleared:
-				t.Fatal("delete must wait for the in-flight renewal")
+			case <-clearDone:
+				t.Fatal("reset must wait for in-flight Redis operation")
 			default:
 			}
-
-			// Other accounts, including creating a new slot, are not blocked by the
-			// pending delete (the stalled Redis is not touched here).
-			require.Less(t, elapsed(func() {
-				registry.Sync(otherID, true, time.Time{})
-				require.True(t, registry.Enabled(otherID))
-				require.NotNil(t, registry.existingSlot(otherID).currentState())
-				registry.Sync(otherID, true, time.Time{})
-			}), sharedRefreshTimeout/2)
-
-			// Let the renewal finish before its timeout: it restores the key, and
-			// the ordered delete then removes it.
-			time.Sleep(50 * time.Millisecond)
+			require.Less(t, elapsed(func() { registry.Sync(otherID, true, time.Time{}); require.True(t, registry.Enabled(otherID)) }), sharedRefreshTimeout/2)
 			proxy.blocked.Store(false)
-			<-refreshed
+			<-readDone
 			select {
-			case <-cleared:
+			case <-clearDone:
 			case <-time.After(5 * time.Second):
-				t.Fatal("delete did not finish")
+				t.Fatal("reset did not finish")
 			}
-			require.False(t, server.Exists(key))
-
-			// The replaced state cannot revive the coding afterwards.
-			registry.Sync(accountID, true, time.Time{})
-			registry.refreshSharedAlgorithm(context.Background(), accountID, negotiation)
-			require.False(t, server.Exists(key))
+			require.False(t, server.Exists(sharedAlgorithmKey(id)))
+			registry.Sync(id, true, time.Time{})
+			_, err := registry.syncShared(context.Background(), id, stale)
+			require.ErrorIs(t, err, errSharedStateBusy)
+			require.False(t, server.Exists(sharedAlgorithmKey(id)))
 		})
 	}
 }
 
-func TestRegistryResetAfterConcurrentRefreshesLeavesNoKey(t *testing.T) {
-	server, client := sharedTestRedis(t)
+func TestSharedResetLostReplyDoesNotRetryOverNewerPublication(t *testing.T) {
+	server := miniredis.RunT(t)
+	proxy := newDelayProxy(t, server.Addr())
+	// Match production's default network retry policy rather than MaxRetries:-1.
+	client := redis.NewClient(&redis.Options{Addr: proxy.listener.Addr().String(), MinRetryBackoff: time.Millisecond, MaxRetryBackoff: time.Millisecond})
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
 	registry := sharedTestRegistry(client)
-	const accountID int64 = 744
-	negotiation := settleTestState(t, registry, accountID, AlgorithmBrotli)
-	registry.persistSharedAlgorithm(context.Background(), accountID, AlgorithmBrotli)
-
-	var wg sync.WaitGroup
-	stop := make(chan struct{})
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-					registry.refreshSharedAlgorithm(context.Background(), accountID, negotiation)
-				}
-			}
-		}()
-	}
-	time.Sleep(20 * time.Millisecond)
-	registry.Reset(context.Background(), accountID)
-	close(stop)
-	wg.Wait()
-	require.False(t, server.Exists(sharedAlgorithmKey(accountID)))
-}
-
-func requireInvalidationMarker(t *testing.T, server *miniredis.Miniredis, accountID int64, want bool) {
-	t.Helper()
-	require.Equal(t, want, server.Exists(sharedInvalidationKey(accountID)))
-}
-
-func TestRegistryStaleInstanceCannotRestoreAfterResetOrRetire(t *testing.T) {
-	for name, invalidate := range map[string]func(*Registry, int64){
-		"reset":   func(r *Registry, id int64) { r.Reset(context.Background(), id) },
-		"disable": func(r *Registry, id int64) { r.Sync(id, false, time.Time{}) },
-		"retire":  func(r *Registry, id int64) { r.deleteSharedAlgorithm(context.Background(), id, AlgorithmBrotli) },
-	} {
-		t.Run(name, func(t *testing.T) {
-			server, client := sharedTestRedis(t)
-			a, b := sharedTestRegistry(client), sharedTestRegistry(client)
-			const accountID int64 = 750
-			settleTestState(t, a, accountID, AlgorithmBrotli)
-			stale := settleTestState(t, b, accountID, AlgorithmBrotli)
-			a.persistSharedAlgorithm(context.Background(), accountID, AlgorithmBrotli)
-			b.refreshSharedAlgorithm(context.Background(), accountID, stale)
-			requireSharedAlgorithm(t, server, accountID, AlgorithmBrotli)
-
-			invalidate(a, accountID)
-			require.False(t, server.Exists(sharedAlgorithmKey(accountID)))
-			requireInvalidationMarker(t, server, accountID, true)
-
-			// B's local coding is still valid for its own requests but must not
-			// republish the invalidated value.
-			b.refreshSharedAlgorithm(context.Background(), accountID, stale)
-			require.False(t, server.Exists(sharedAlgorithmKey(accountID)))
-			require.Equal(t, AlgorithmBrotli, stale.settledAlgorithm())
-			require.Same(t, stale, b.existingSlot(accountID).currentState())
-		})
-	}
-}
-
-func TestRegistryLateRefreshScriptCannotReviveAfterReset(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	registry := sharedTestRegistry(client)
-	const accountID int64 = 751
-	settleTestState(t, registry, accountID, AlgorithmBrotli)
-	registry.persistSharedAlgorithm(context.Background(), accountID, AlgorithmBrotli)
-	registry.Reset(context.Background(), accountID)
-
-	// A renewal whose command reaches Redis only after the reset.
-	result, err := refreshSharedAlgorithmScript.Run(context.Background(), client,
-		[]string{sharedAlgorithmKey(accountID), sharedInvalidationKey(accountID)},
-		string(AlgorithmBrotli), sharedAlgorithmTTL.Milliseconds()).Int()
+	registry.sharedWrite = client.WithTimeout(50 * time.Millisecond)
+	direct := redis.NewClient(&redis.Options{Addr: server.Addr(), MaxRetries: -1})
+	t.Cleanup(func() { require.NoError(t, direct.Close()) })
+	other := sharedTestRegistry(direct)
+	const id int64 = 740
+	registry.Reset(context.Background(), id) // preload reset script before blocking
+	publishTestAlgorithm(t, registry, id, AlgorithmBrotli)
+	proxy.blocked.Store(true)
+	done := make(chan struct{})
+	go func() { defer close(done); registry.Reset(context.Background(), id) }()
+	require.Eventually(t, func() bool { return !server.Exists(sharedAlgorithmKey(id)) }, time.Second, time.Millisecond)
+	resetRevision, err := server.Get(sharedRevisionKey(id))
 	require.NoError(t, err)
-	require.Equal(t, 3, result)
-	require.False(t, server.Exists(sharedAlgorithmKey(accountID)))
+	publishTestAlgorithm(t, other, id, AlgorithmZstd)
+	newRevision, err := server.Get(sharedRevisionKey(id))
+	require.NoError(t, err)
+	require.NotEqual(t, resetRevision, newRevision)
+	// Redis executed the reset, but its response is lost. Automatic go-redis
+	// retries would now delete zstd and move the revision backwards to resetRevision.
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reset did not respect socket timeout")
+	}
+	proxy.blocked.Store(false)
+	requireSharedAlgorithm(t, server, id, AlgorithmZstd)
+	currentRevision, err := server.Get(sharedRevisionKey(id))
+	require.NoError(t, err)
+	require.Equal(t, newRevision, currentRevision)
 }
 
-func TestRegistryRealNegotiationClearsInvalidationMarker(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	a, b := sharedTestRegistry(client), sharedTestRegistry(client)
-	const accountID int64 = 752
-	settleTestState(t, a, accountID, AlgorithmBrotli)
-	stale := settleTestState(t, b, accountID, AlgorithmBrotli)
-	a.Reset(context.Background(), accountID)
-	requireInvalidationMarker(t, server, accountID, true)
-
-	// The administrator re-enables the account and a probe succeeds again.
-	fresh := settleTestState(t, a, accountID, AlgorithmBrotli)
-	a.persistSharedAlgorithm(context.Background(), accountID, AlgorithmBrotli)
-	requireSharedAlgorithm(t, server, accountID, AlgorithmBrotli)
-	require.Equal(t, sharedAlgorithmTTL, server.TTL(sharedAlgorithmKey(accountID)))
-	requireInvalidationMarker(t, server, accountID, false)
-
-	// With the marker gone both instances renew the real value as usual.
-	server.SetTTL(sharedAlgorithmKey(accountID), time.Hour)
-	b.refreshSharedAlgorithm(context.Background(), accountID, stale)
-	require.Equal(t, sharedAlgorithmTTL, server.TTL(sharedAlgorithmKey(accountID)))
-	a.refreshSharedAlgorithm(context.Background(), accountID, fresh)
-	requireSharedAlgorithm(t, server, accountID, AlgorithmBrotli)
-
-	// A different real negotiation replaces the coding; stale B does not undo it.
-	settleTestState(t, a, accountID, AlgorithmZstd)
-	a.persistSharedAlgorithm(context.Background(), accountID, AlgorithmZstd)
-	server.SetTTL(sharedAlgorithmKey(accountID), time.Hour)
-	b.refreshSharedAlgorithm(context.Background(), accountID, stale)
-	requireSharedAlgorithm(t, server, accountID, AlgorithmZstd)
-	require.Equal(t, time.Hour, server.TTL(sharedAlgorithmKey(accountID)))
-}
-
-func TestRegistryInvalidationMarkerIsBounded(t *testing.T) {
+func TestSharedRetirementWriteFailureCannotPinLocalIdentity(t *testing.T) {
 	server, client := sharedTestRedis(t)
 	registry := sharedTestRegistry(client)
-	const accountID int64 = 753
-	settleTestState(t, registry, accountID, AlgorithmBrotli)
-	registry.Reset(context.Background(), accountID)
-	require.Equal(t, sharedInvalidationTTL, server.TTL(sharedInvalidationKey(accountID)))
-	require.Equal(t, 6*time.Hour, sharedInvalidationTTL)
-
-	// Repeated resets rewrite the marker with the same bound instead of growing it.
-	server.FastForward(time.Hour)
-	registry.Reset(context.Background(), accountID)
-	require.Equal(t, sharedInvalidationTTL, server.TTL(sharedInvalidationKey(accountID)))
-
-	// After the bound the marker disappears and no key is left behind.
-	server.FastForward(sharedInvalidationTTL + time.Second)
-	require.Empty(t, server.Keys())
+	const id int64 = 741
+	publishTestAlgorithm(t, registry, id, AlgorithmZstd)
+	resp, err := registry.Execute(id, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("Content-Encoding") != "" {
+			server.SetError("ERR retirement write unavailable")
+			return rejectionResponse("unsupported content encoding"), nil
+		}
+		return okResponse("plain"), nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	server.SetError("")
+	requireSharedAlgorithm(t, server, id, AlgorithmZstd)
+	resp, err = registry.Execute(id, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, "zstd", req.Header.Get("Content-Encoding"))
+		return okResponse("authoritative coding"), nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
 }
 
-func TestRegistryRetireOfDifferentCodingKeepsCodingAndMarker(t *testing.T) {
-	server, client := sharedTestRedis(t)
+func TestDisablingRedisRestoresBoundedMemoryOnlyCooldown(t *testing.T) {
+	_, client := sharedTestRedis(t)
 	registry := sharedTestRegistry(client)
-	const accountID int64 = 754
-
-	// A stale retirement of br while another instance published zstd: no marker.
-	require.NoError(t, server.Set(sharedAlgorithmKey(accountID), "zstd"))
-	registry.deleteSharedAlgorithm(context.Background(), accountID, AlgorithmBrotli)
-	requireSharedAlgorithm(t, server, accountID, AlgorithmZstd)
-	requireInvalidationMarker(t, server, accountID, false)
-
-	// With a marker already present, a mismatching retirement leaves both alone.
-	require.NoError(t, server.Set(sharedInvalidationKey(accountID), "1"))
-	server.SetTTL(sharedInvalidationKey(accountID), time.Hour)
-	server.SetTTL(sharedAlgorithmKey(accountID), 2*time.Hour)
-	registry.deleteSharedAlgorithm(context.Background(), accountID, AlgorithmBrotli)
-	requireSharedAlgorithm(t, server, accountID, AlgorithmZstd)
-	require.Equal(t, time.Hour, server.TTL(sharedInvalidationKey(accountID)))
-	require.Equal(t, 2*time.Hour, server.TTL(sharedAlgorithmKey(accountID)))
-}
-
-func TestRegistryRetireWithAbsentKeyWritesMarker(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	registry := sharedTestRegistry(client)
-	const accountID int64 = 755
-	registry.deleteSharedAlgorithm(context.Background(), accountID, AlgorithmBrotli)
-	requireInvalidationMarker(t, server, accountID, true)
-}
-
-func TestRegistryRefreshRestoresAfterTTLExpiryOrFlushWithoutMarker(t *testing.T) {
-	server, client := sharedTestRedis(t)
-	registry := sharedTestRegistry(client)
-	const accountID int64 = 756
-	negotiation := settleTestState(t, registry, accountID, AlgorithmZstd)
-	registry.persistSharedAlgorithm(context.Background(), accountID, AlgorithmZstd)
-	key := sharedAlgorithmKey(accountID)
-
-	server.FastForward(sharedAlgorithmTTL + time.Second)
-	require.False(t, server.Exists(key))
-	registry.refreshSharedAlgorithm(context.Background(), accountID, negotiation)
-	requireSharedAlgorithm(t, server, accountID, AlgorithmZstd)
-	require.Equal(t, sharedAlgorithmTTL, server.TTL(key))
-
-	server.FlushAll()
-	registry.refreshSharedAlgorithm(context.Background(), accountID, negotiation)
-	requireSharedAlgorithm(t, server, accountID, AlgorithmZstd)
-	requireInvalidationMarker(t, server, accountID, false)
+	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	registry.nowFunc = func() time.Time { return now }
+	const id int64 = 742
+	publishTestAlgorithm(t, registry, id, AlgorithmBrotli)
+	before := readRegistrySnapshot(t, registry, id)
+	publishTestIdentity(t, registry, id, before, AlgorithmBrotli)
+	registry.SetRedis(nil)
+	now = now.Add(ambiguousIdentityRetryTTL)
+	resp, err := registry.Execute(id, newTestRequest(t, testBody()), func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, "br", req.Header.Get("Content-Encoding"))
+		return okResponse("local recovery"), nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
 }

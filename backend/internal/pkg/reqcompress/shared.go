@@ -2,6 +2,8 @@ package reqcompress
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -18,119 +20,155 @@ const (
 	sharedAlgorithmKeyPrefix = "reqcompress:account:"
 	sharedIdentityValue      = "identity"
 	sharedStateWriteTimeout  = 5 * time.Second
-	// sharedRefreshTimeout bounds the per-request TTL renewal. It is shorter
-	// than sharedStateWriteTimeout because refresh is best effort and runs on
-	// the request path.
-	sharedRefreshTimeout = 500 * time.Millisecond
-	// sharedAlgorithmTTL is a sliding lifetime: every successful negotiation and
-	// every request that still uses the settled coding renews it, so only an
-	// account that has been idle for the full period loses its shared value.
-	sharedAlgorithmTTL = 6 * time.Hour
-	// sharedInvalidationTTL bounds the retired/reset marker. After it expires a
-	// stale instance could restore its coding again, so the marker only needs to
-	// outlive the propagation of local state and in-flight renewals.
-	sharedInvalidationTTL = 6 * time.Hour
-	// sharedRefreshLogInterval limits per-account refresh failure logs so a
-	// Redis outage cannot emit one warning for every request.
+	sharedRefreshTimeout     = 500 * time.Millisecond
+	sharedAlgorithmTTL       = 6 * time.Hour
+	sharedInvalidationTTL    = 6 * time.Hour
 	sharedRefreshLogInterval = time.Minute
 )
 
-// refreshSharedAlgorithmScript atomically renews the TTL of the expected coding.
-// A missing key (TTL expiry, Redis restart or flush) is recreated with the
-// expected coding unless an invalidation marker (KEYS[2]) shows that the coding
-// was retired or reset; a different coding published by another instance is
-// left untouched, including its TTL. Return values: 1 renewed, 2 restored,
-// 3 skipped because of the marker, 0 skipped because of a different coding.
-var refreshSharedAlgorithmScript = redis.NewScript(`
+// Each state transition rotates a bounded revision token. The algorithm key
+// stays compatible with older releases, but all instances must be upgraded to
+// enforce fencing: older writers do not compare revisions. Revisions outlive
+// the 30-minute identity key and are initialized again after expiry/Redis restart,
+// so a missing key never lets a stale request revive an old cooldown or coding.
+// All scripts return value, PTTL and revision from the same atomic operation.
+const sharedSnapshotLua = `
+local function snapshot()
+    return {redis.call('GET', KEYS[1]) or '', redis.call('PTTL', KEYS[1]), redis.call('GET', KEYS[3]) or ''}
+end
+`
+
+var readSharedAlgorithmScript = redis.NewScript(sharedSnapshotLua + `
+local revision = redis.call('GET', KEYS[3])
+if not revision then
+    redis.call('SET', KEYS[3], ARGV[1], 'PX', ARGV[2])
+end
 local current = redis.call('GET', KEYS[1])
-if current == ARGV[1] then
+if current == 'br' or current == 'zstd' or current == 'deflate' then
     redis.call('PEXPIRE', KEYS[1], ARGV[2])
-    return 1
+    redis.call('PEXPIRE', KEYS[3], ARGV[2])
+elseif current == 'identity' and redis.call('PTTL', KEYS[1]) < 0 then
+    -- A legacy non-expiring identity must not disable recovery forever.
+    redis.call('DEL', KEYS[1])
+    redis.call('SET', KEYS[3], ARGV[1], 'PX', ARGV[2])
 end
-if not current then
-    if redis.call('EXISTS', KEYS[2]) == 1 then
-        return 3
-    end
-    redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
-    return 2
-end
-return 0
+return snapshot()
 `)
 
-// persistSharedAlgorithmScript publishes a freshly negotiated coding and clears
-// the invalidation marker in one step, so a later administrative re-enable can
-// probe and publish again.
-var persistSharedAlgorithmScript = redis.NewScript(`
-redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
-redis.call('DEL', KEYS[2])
-return 1
+var persistSharedAlgorithmScript = redis.NewScript(sharedSnapshotLua + `
+local current = redis.call('GET', KEYS[1]) or ''
+local revision = redis.call('GET', KEYS[3]) or ''
+if revision == ARGV[1] and current == ARGV[2] and current ~= 'identity' then
+    redis.call('SET', KEYS[1], ARGV[3], 'PX', ARGV[4])
+    redis.call('SET', KEYS[3], ARGV[5], 'PX', ARGV[4])
+    redis.call('DEL', KEYS[2])
+end
+return snapshot()
 `)
 
-// readSharedAlgorithmScript reads a coding and its remaining lifetime
-// atomically, so a concurrent replacement cannot pair one value with another
-// value's TTL. Empty values are never valid negotiation results and represent
-// a missing key; PTTL -1 marks a legacy coding without an expiry.
-var readSharedAlgorithmScript = redis.NewScript(`
-local current = redis.call('GET', KEYS[1])
-if not current then
-    return {'', -2}
+// A settled replay may only replace the coding it actually observed. In
+// particular, an expired/missing coding is not permission to create identity.
+// Fresh trials can publish from an observed missing key. A concurrent identity
+// or coding wins, and returning its PTTL aligns the losing instance immediately.
+var persistSharedIdentityScript = redis.NewScript(sharedSnapshotLua + `
+local current = redis.call('GET', KEYS[1]) or ''
+local revision = redis.call('GET', KEYS[3]) or ''
+if revision == ARGV[1] and current == ARGV[2] and current ~= 'identity'
+   and current == ARGV[3] then
+    redis.call('SET', KEYS[1], 'identity', 'PX', ARGV[4])
+    redis.call('SET', KEYS[3], ARGV[5], 'PX', ARGV[6])
+    redis.call('DEL', KEYS[2])
 end
-return {current, redis.call('PTTL', KEYS[1])}
+return snapshot()
 `)
 
-// persistSharedIdentityScript lets a proven coding win over a late identity
-// result and never extends an existing shared identity deadline. ARGV[2] names
-// the only coding identity may replace: a settled coding whose failure a plain
-// replay of the same request just recovered. It is empty after an initial
-// trial, so a coding another instance negotiated is always kept. Only a fresh
-// negotiation after the old identity expired may create a new 30-minute value.
-var persistSharedIdentityScript = redis.NewScript(`
-local current = redis.call('GET', KEYS[1])
-if current == 'identity' then
-    return 2
+var retireSharedAlgorithmScript = redis.NewScript(sharedSnapshotLua + `
+local current = redis.call('GET', KEYS[1]) or ''
+local revision = redis.call('GET', KEYS[3]) or ''
+if ARGV[1] == '' or (current == ARGV[1] and revision == ARGV[2]) then
+    redis.call('DEL', KEYS[1])
+    redis.call('SET', KEYS[2], '1', 'PX', ARGV[3])
+    redis.call('SET', KEYS[3], ARGV[4], 'PX', ARGV[3])
 end
-if current and current ~= ARGV[2] then
-    return 0
-end
-redis.call('SET', KEYS[1], 'identity', 'PX', ARGV[1])
-redis.call('DEL', KEYS[2])
-return 1
+return snapshot()
 `)
 
-// retireSharedAlgorithmScript deletes the shared coding and leaves a
-// time-limited invalidation marker. ARGV[1] is the expected coding, or empty
-// for an unconditional administrative reset. A different coding currently in
-// the key is neither deleted nor marked. Return values: 1 deleted, 2 key
-// already absent (marker written), 0 different coding kept.
-var retireSharedAlgorithmScript = redis.NewScript(`
-local current = redis.call('GET', KEYS[1])
-if ARGV[1] ~= '' and current and current ~= ARGV[1] then
-    return 0
-end
-redis.call('DEL', KEYS[1])
-redis.call('SET', KEYS[2], '1', 'PX', ARGV[2])
-if current then
-    return 1
-end
-return 2
-`)
+// sharedScripter disables transport retries for these stateful scripts. In
+// particular an unconditional reset must not execute again after a lost reply
+// and delete a newer instance's publication. redis.Script.Run may still retry
+// NOSCRIPT with EVAL, because NOSCRIPT guarantees no script was executed.
+type sharedScripter struct{ *redis.Client }
+type sharedCommand struct{ *redis.Cmd }
 
-// sharedRefreshLogTimes holds the last refresh-failure log time per account
-// (unix nanoseconds), bounded by the number of accounts.
-var sharedRefreshLogTimes sync.Map
-
-// ConfigureRedis attaches the process-wide registry to the shared negotiation
-// store. A nil client restores the memory-only behavior used by tests and by
-// deployments that have not initialized Redis yet.
-func ConfigureRedis(client *redis.Client) {
-	defaultRegistry.SetRedis(client)
+func (*sharedCommand) NoRetry() bool { return true }
+func (c sharedScripter) eval(ctx context.Context, operation, script string, keys []string, args ...any) *redis.Cmd {
+	commandArgs := []any{operation, script, len(keys)}
+	for _, key := range keys {
+		commandArgs = append(commandArgs, key)
+	}
+	commandArgs = append(commandArgs, args...)
+	cmd := redis.NewCmd(ctx, commandArgs...)
+	_ = c.Process(ctx, &sharedCommand{Cmd: cmd})
+	return cmd
+}
+func (c sharedScripter) Eval(ctx context.Context, script string, keys []string, args ...any) *redis.Cmd {
+	return c.eval(ctx, "eval", script, keys, args...)
+}
+func (c sharedScripter) EvalSha(ctx context.Context, hash string, keys []string, args ...any) *redis.Cmd {
+	return c.eval(ctx, "evalsha", hash, keys, args...)
 }
 
-// SetRedis attaches this registry to the shared negotiation store. The request
-// hot path uses the process-local coding and reads Redis only while
-// initializing an account; each request also renews the shared TTL on a best
-// effort basis without waiting behind other renewals. Administrative display
-// reads use the latest shared snapshot, and writes follow state transitions.
+var sharedRefreshLogTimes sync.Map
+var errSharedStateBusy = errors.New("request compression shared state is being updated")
+
+// sharedSnapshot is owned by one Execute call. Only that request's successful
+// retirement advances it, allowing its replacement trial to publish. Conflicts
+// never advance the expected revision, even when local state is reconciled.
+type sharedSnapshot struct {
+	owner    *state
+	raw      string
+	revision string
+	ttl      time.Duration
+	readAt   time.Time
+}
+
+func newSharedRevision() string {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		panic("reqcompress: cannot generate shared revision: " + err.Error())
+	}
+	return hex.EncodeToString(token[:])
+}
+
+func sharedKeys(accountID int64) []string {
+	return []string{sharedAlgorithmKey(accountID), sharedInvalidationKey(accountID), sharedRevisionKey(accountID)}
+}
+
+func decodeSharedSnapshot(result any, readAt time.Time) (*sharedSnapshot, error) {
+	values, ok := result.([]any)
+	if !ok || len(values) != 3 {
+		return nil, fmt.Errorf("invalid shared request compression snapshot %T", result)
+	}
+	raw, rawOK := values[0].(string)
+	ttl, ttlOK := values[1].(int64)
+	revision, revisionOK := values[2].(string)
+	if !rawOK || !ttlOK || !revisionOK {
+		return nil, fmt.Errorf("invalid shared request compression snapshot fields")
+	}
+	if raw != "" {
+		if _, ok := parseSharedAlgorithm(raw); !ok {
+			return nil, fmt.Errorf("invalid shared request compression algorithm %q", raw)
+		}
+	}
+	return &sharedSnapshot{raw: raw, revision: revision, ttl: time.Duration(ttl) * time.Millisecond, readAt: readAt}, nil
+}
+
+func ConfigureRedis(client *redis.Client) { defaultRegistry.SetRedis(client) }
+
+// SetRedis configures the authoritative shared store. Each request reads its
+// current value and renews only a coding's sliding TTL. Redis errors or a busy
+// local writer send this request plain, without creating a local cooldown;
+// the next request retries Redis. Memory-only deployments keep local behavior.
 func (r *Registry) SetRedis(client *redis.Client) {
 	if r == nil {
 		return
@@ -139,10 +177,10 @@ func (r *Registry) SetRedis(client *redis.Client) {
 	defer r.mu.Unlock()
 	r.shared = client
 	r.sharedRefresh = nil
+	r.sharedWrite = nil
 	if client != nil {
-		// Cache the lightweight clone once, rather than cloning options/hooks
-		// on every forwarded request. It shares (and does not own) the pool.
 		r.sharedRefresh = client.WithTimeout(sharedRefreshTimeout)
+		r.sharedWrite = client.WithTimeout(sharedStateWriteTimeout)
 	}
 }
 
@@ -154,7 +192,6 @@ func (r *Registry) sharedRedis() *redis.Client {
 	defer r.mu.RUnlock()
 	return r.shared
 }
-
 func (r *Registry) sharedRefreshRedis() *redis.Client {
 	if r == nil {
 		return nil
@@ -163,18 +200,21 @@ func (r *Registry) sharedRefreshRedis() *redis.Client {
 	defer r.mu.RUnlock()
 	return r.sharedRefresh
 }
-
+func (r *Registry) sharedWriteRedis() *redis.Client {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.sharedWrite
+}
 func sharedAlgorithmKey(accountID int64) string {
 	return sharedAlgorithmKeyPrefix + strconv.FormatInt(accountID, 10) + ":algorithm"
 }
-
-// sharedInvalidationKey names the short-lived marker written when a coding is
-// retired or reset. While it exists, refresh does not recreate a missing
-// algorithm key, so an instance with a stale local coding cannot revive it.
 func sharedInvalidationKey(accountID int64) string {
 	return sharedAlgorithmKey(accountID) + ":invalidated"
 }
-
+func sharedRevisionKey(accountID int64) string { return sharedAlgorithmKey(accountID) + ":revision" }
 func parseSharedAlgorithm(raw string) (Algorithm, bool) {
 	algorithm := Algorithm(strings.TrimSpace(raw))
 	switch algorithm {
@@ -187,197 +227,173 @@ func parseSharedAlgorithm(raw string) (Algorithm, bool) {
 	}
 }
 
-// hydrateShared initializes one account from Redis. Holding the state lock
-// across the read prevents a concurrent local trial from racing the snapshot.
-// A failed read is retried on a later initialization attempt; the caller sends
-// identity in the meantime instead of restarting negotiation with stale or
-// unknown shared state.
-func (r *Registry) hydrateShared(ctx context.Context, accountID int64, negotiation *state) error {
-	client := r.sharedRedis()
-	if client == nil || negotiation == nil {
-		return nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	negotiation.mu.Lock()
-	defer negotiation.mu.Unlock()
-	if negotiation.sharedLoaded || negotiation.tested || negotiation.negotiating {
-		return nil
-	}
-
-	result, err := readSharedAlgorithmScript.Run(ctx, client, []string{sharedAlgorithmKey(accountID)}).Result()
-	if err != nil {
-		return err
-	}
-	values, ok := result.([]any)
-	if !ok || len(values) != 2 {
-		return fmt.Errorf("invalid shared request compression snapshot %T", result)
-	}
-	raw, _ := values[0].(string)
-	if raw == "" {
-		negotiation.sharedLoaded = true
-		return nil
-	}
-	ttlMillis, _ := values[1].(int64)
-	algorithm, ok := parseSharedAlgorithm(raw)
-	if !ok {
-		return fmt.Errorf("invalid shared request compression algorithm %q", raw)
-	}
-
-	negotiation.sharedLoaded = true
-	negotiation.current = algorithm
-	negotiation.tested = true
-	negotiation.negotiating = false
-	if algorithm == AlgorithmNone {
-		// Shared identity is only produced for ambiguous failures. Preserve all
-		// candidates and align this instance to the same Redis-backed deadline.
-		negotiation.remaining = append([]Algorithm(nil), TrialOrder...)
-		if ttlMillis > 0 {
-			negotiation.identityRetryAt = r.now().Add(time.Duration(ttlMillis) * time.Millisecond)
-		} else {
-			// Never accept a non-expiring identity result: re-probe immediately.
-			negotiation.identityRetryAt = r.now()
-		}
-		return nil
-	}
-	negotiation.identityRetryAt = time.Time{}
-	negotiation.remaining = keepFrom(TrialOrder, algorithm)
-	return nil
+// sharedReadFlight shares one bounded read among overlapping requests. Each
+// waiter gets its own snapshot copy because a successful request retirement
+// advances only that request's expected revision.
+type sharedReadFlight struct {
+	owner    *state
+	done     chan struct{}
+	snapshot *sharedSnapshot
+	err      error
 }
 
-// persistSharedIdentity publishes the same 30-minute ambiguous-identity
-// deadline to every instance. It never slides on reads or requests; the key
-// expires naturally before candidates are retried. replaceable is the settled
-// coding a plain replay just recovered from, or AlgorithmNone after an initial
-// trial; any other shared coding is kept.
-func (r *Registry) persistSharedIdentity(ctx context.Context, accountID int64, negotiation *state, retryAt time.Time, replaceable Algorithm) {
-	client := r.sharedRedis()
+// syncShared synchronizes every request, including already settled instances.
+// Concurrent readers share one Redis call instead of losing compression during
+// normal bursts. A writer already holding sharedMu still fails open to plain.
+func (r *Registry) syncShared(ctx context.Context, accountID int64, negotiation *state) (*sharedSnapshot, error) {
+	client := r.sharedRefreshRedis()
 	if client == nil || negotiation == nil {
-		return
+		return nil, nil
 	}
 	slot := r.existingSlot(accountID)
 	if slot == nil {
-		return
+		return nil, errSharedStateBusy
 	}
-	slot.sharedMu.Lock()
+	slot.mu.Lock()
+	if slot.state != negotiation {
+		slot.mu.Unlock()
+		return nil, errSharedStateBusy
+	}
+	flight := slot.sharedRead
+	leader := flight == nil || flight.owner != negotiation
+	if leader {
+		flight = &sharedReadFlight{owner: negotiation, done: make(chan struct{})}
+		slot.sharedRead = flight
+	}
+	slot.mu.Unlock()
+	if leader {
+		flight.snapshot, flight.err = r.readShared(ctx, client, slot, accountID, negotiation)
+		slot.mu.Lock()
+		if slot.sharedRead == flight {
+			slot.sharedRead = nil
+		}
+		close(flight.done)
+		slot.mu.Unlock()
+	} else {
+		waitCtx, cancel := sharedContext(ctx, sharedRefreshTimeout)
+		defer cancel()
+		select {
+		case <-flight.done:
+		case <-waitCtx.Done():
+			return nil, waitCtx.Err()
+		}
+	}
+	if flight.err != nil {
+		return nil, flight.err
+	}
+	if slot.currentState() != negotiation {
+		return nil, errSharedStateBusy
+	}
+	snapshot := *flight.snapshot
+	return &snapshot, nil
+}
+
+func (r *Registry) readShared(ctx context.Context, client *redis.Client, slot *entry, accountID int64, negotiation *state) (*sharedSnapshot, error) {
+	if !slot.sharedMu.TryLock() {
+		return nil, errSharedStateBusy
+	}
 	defer slot.sharedMu.Unlock()
 	if slot.currentState() != negotiation {
-		return
+		return nil, errSharedStateBusy
 	}
-	currentRetryAt, ok := negotiation.identityRetry()
-	if !ok || !currentRetryAt.Equal(retryAt) {
-		return
-	}
-	ttl := retryAt.Sub(r.now())
-	if ttl <= 0 {
-		return
-	}
-	ctx, cancel := sharedWriteContext(ctx)
+	ctx, cancel := sharedContext(ctx, sharedRefreshTimeout)
 	defer cancel()
-	if err := persistSharedIdentityScript.Run(ctx, client,
-		[]string{sharedAlgorithmKey(accountID), sharedInvalidationKey(accountID)},
-		ttl.Milliseconds(), string(replaceable)).Err(); err != nil {
-		slog.Warn("reqcompress shared identity store failed", "account_id", accountID, "error", err)
+	// Start before the round trip: a delayed reply must never move an identity
+	// deadline later than Redis's actual remaining lifetime.
+	started := r.now()
+	result, err := readSharedAlgorithmScript.Run(ctx, sharedScripter{client}, sharedKeys(accountID), newSharedRevision(), sharedAlgorithmTTL.Milliseconds()).Result()
+	if err != nil {
+		return nil, err
 	}
+	snapshot, err := decodeSharedSnapshot(result, started)
+	if err != nil {
+		return nil, err
+	}
+	if slot.currentState() != negotiation {
+		return nil, errSharedStateBusy
+	}
+	snapshot.owner = negotiation
+	negotiation.applyShared(snapshot)
+	return snapshot, nil
 }
 
 func sharedWriteContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return sharedContext(ctx, sharedStateWriteTimeout)
 }
-
 func sharedContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// The upstream request may be canceled immediately after a successful
-	// response. Shared state must still reflect that completed negotiation.
 	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
 }
 
-func (r *Registry) persistSharedAlgorithm(ctx context.Context, accountID int64, algorithm Algorithm) {
-	client := r.sharedRedis()
-	if client == nil || algorithm == AlgorithmNone {
+// persistSharedAlgorithm publishes only against the snapshot that started the
+// request. A late success cannot replace a cooldown, a newer coding, or reset.
+func (r *Registry) persistSharedAlgorithm(ctx context.Context, accountID int64, algorithm Algorithm, expected *sharedSnapshot) {
+	client := r.sharedWriteRedis()
+	if client == nil || algorithm == AlgorithmNone || expected == nil {
 		return
 	}
 	slot := r.existingSlot(accountID)
 	if slot == nil {
 		return
 	}
-
-	// Do not let a request that finishes after an administrative disable/reset
-	// resurrect its old result. Reset/disable clear the local state first and
-	// then delete under sharedMu, so this check and write are ordered before or
-	// after them; the state lock itself is not held across the network write.
 	slot.sharedMu.Lock()
 	defer slot.sharedMu.Unlock()
-	if negotiation := slot.currentState(); negotiation == nil || negotiation.settledAlgorithm() != algorithm {
+	negotiation := slot.currentState()
+	if negotiation == nil || negotiation != expected.owner {
 		return
 	}
 	ctx, cancel := sharedWriteContext(ctx)
 	defer cancel()
-	// The TTL slides: requests keep renewing it through refreshSharedAlgorithm,
-	// and an actual rejection retires the value and triggers renegotiation.
-	if err := persistSharedAlgorithmScript.Run(ctx, client,
-		[]string{sharedAlgorithmKey(accountID), sharedInvalidationKey(accountID)},
-		string(algorithm), sharedAlgorithmTTL.Milliseconds()).Err(); err != nil {
-		slog.Warn("reqcompress shared state store failed", "account_id", accountID,
-			"algorithm", algorithm, "error", err)
-	}
+	started := r.now()
+	result, err := persistSharedAlgorithmScript.Run(ctx, sharedScripter{client}, sharedKeys(accountID), expected.revision, expected.raw,
+		string(algorithm), sharedAlgorithmTTL.Milliseconds(), newSharedRevision()).Result()
+	r.applySharedWrite(slot, negotiation, accountID, expected, started, result, err)
 }
 
-// refreshSharedAlgorithm renews the 6h shared TTL of the coding negotiation has
-// settled on. Callers invoke it once per request after obtaining the state and
-// before any eligibility decision, so small or ineligible requests and requests
-// that later fail or are canceled still keep a probed coding alive.
-//
-// It is best effort and never delays other requests behind Redis I/O: the
-// per-account write lock is only try-locked, so a request arriving while
-// another write for the account is in flight skips its own renewal (that write
-// renews the TTL or republishes the value anyway). It never changes local
-// negotiation; a Redis failure is only logged (rate limited). The call is
-// bounded by sharedRefreshTimeout, both through the context and through the
-// client's socket deadlines, because go-redis ignores context deadlines unless
-// ContextTimeoutEnabled is set.
-//
-// The Lua script renews only an identical value, recreates a missing key, and
-// leaves a different coding untouched. Reset/disable clear the local state and
-// then delete under the same write lock, so a state they replaced cannot
-// republish its coding, and an in-flight renewal finishes before the delete.
-func (r *Registry) refreshSharedAlgorithm(ctx context.Context, accountID int64, negotiation *state) {
-	client := r.sharedRefreshRedis()
-	if client == nil || negotiation == nil {
+func (r *Registry) persistSharedIdentity(ctx context.Context, accountID int64, negotiation *state, _ time.Time, replaceable Algorithm, expected *sharedSnapshot) {
+	client := r.sharedWriteRedis()
+	if client == nil || negotiation == nil || expected == nil {
 		return
 	}
 	slot := r.existingSlot(accountID)
 	if slot == nil {
 		return
 	}
-	if !slot.sharedMu.TryLock() {
-		return
-	}
+	slot.sharedMu.Lock()
 	defer slot.sharedMu.Unlock()
-
-	// Read the coding under sharedMu: a retirement changes local state before
-	// it takes sharedMu to delete, so a stale coding is never republished after
-	// its delete.
 	if slot.currentState() != negotiation {
 		return
 	}
-	algorithm := negotiation.settledAlgorithm()
-	if algorithm == AlgorithmNone {
+	// The Redis command creates the fixed deadline, not a process-local timer.
+	// Do not retry this write after an uncertain outcome; next request reads it.
+	ctx, cancel := sharedWriteContext(ctx)
+	defer cancel()
+	started := r.now()
+	result, err := persistSharedIdentityScript.Run(ctx, sharedScripter{client}, sharedKeys(accountID), expected.revision, expected.raw,
+		string(replaceable), ambiguousIdentityRetryTTL.Milliseconds(), newSharedRevision(), sharedInvalidationTTL.Milliseconds()).Result()
+	r.applySharedWrite(slot, negotiation, accountID, expected, started, result, err)
+}
+
+func (r *Registry) applySharedWrite(slot *entry, negotiation *state, accountID int64, expected *sharedSnapshot, started time.Time, result any, err error) {
+	if slot.currentState() != negotiation {
 		return
 	}
-	ctx, cancel := sharedContext(ctx, sharedRefreshTimeout)
-	defer cancel()
-	err := refreshSharedAlgorithmScript.Run(ctx, client,
-		[]string{sharedAlgorithmKey(accountID), sharedInvalidationKey(accountID)},
-		string(algorithm), sharedAlgorithmTTL.Milliseconds()).Err()
-	if err != nil && claimSharedRefreshLog(accountID, time.Now()) {
-		slog.Warn("reqcompress shared state refresh failed", "account_id", accountID,
-			"algorithm", algorithm, "error", err)
+	var snapshot *sharedSnapshot
+	if err == nil {
+		snapshot, err = decodeSharedSnapshot(result, started)
 	}
+	if err != nil {
+		// A failed/uncertain publication is not a local capability conclusion.
+		// Never retain its independent 30-minute timer or permanent identity.
+		negotiation.discardSharedResult(expected)
+		if claimSharedRefreshLog(accountID, time.Now()) {
+			slog.Warn("reqcompress shared state store failed", "account_id", accountID, "error", err)
+		}
+		return
+	}
+	negotiation.applyShared(snapshot, true)
 }
 
 func claimSharedRefreshLog(accountID int64, now time.Time) bool {
@@ -398,33 +414,57 @@ func claimSharedRefreshLog(accountID int64, now time.Time) bool {
 	}
 }
 
-// deleteSharedAlgorithm removes a coding that is no longer valid. When expected
-// is non-empty, deletion is conditional so an old failure cannot remove a
-// different algorithm another instance has already settled. An empty expected
-// value means an administrative reset and deletes unconditionally. A delete that
-// takes effect (or finds the key already gone) also leaves a 6h invalidation
-// marker so stale instances cannot recreate the key; a different coding in the
-// key is kept and leaves no marker.
-func (r *Registry) deleteSharedAlgorithm(ctx context.Context, accountID int64, expected Algorithm) {
-	client := r.sharedRedis()
+// deleteSharedAlgorithm is unconditional only for administrative reset/disable.
+// Request retirements compare the exact observed coding and revision. A winning
+// retirement advances its request snapshot for the replacement negotiation.
+func (r *Registry) deleteSharedAlgorithm(ctx context.Context, accountID int64, expected Algorithm, snapshots ...*sharedSnapshot) {
+	client := r.sharedWriteRedis()
 	if client == nil {
 		return
 	}
-	// Serialize with in-flight renewals and writes of this account, creating the
-	// slot when needed so even an unknown account is ordered. r.mu is not held
-	// while waiting for Redis.
-	if slot := r.slot(accountID); slot != nil {
-		slot.sharedMu.Lock()
-		defer slot.sharedMu.Unlock()
+	slot := r.slot(accountID)
+	slot.sharedMu.Lock()
+	defer slot.sharedMu.Unlock()
+	var before *sharedSnapshot
+	if len(snapshots) != 0 {
+		before = snapshots[0]
 	}
+	if expected != AlgorithmNone && (before == nil || slot.currentState() != before.owner) {
+		return
+	}
+	revision := ""
+	if before != nil {
+		revision = before.revision
+	}
+	token := newSharedRevision()
 	ctx, cancel := sharedWriteContext(ctx)
 	defer cancel()
-	err := retireSharedAlgorithmScript.Run(ctx, client,
-		[]string{sharedAlgorithmKey(accountID), sharedInvalidationKey(accountID)},
-		string(expected), sharedInvalidationTTL.Milliseconds()).Err()
+	started := r.now()
+	result, err := retireSharedAlgorithmScript.Run(ctx, sharedScripter{client}, sharedKeys(accountID), string(expected), revision,
+		sharedInvalidationTTL.Milliseconds(), token).Result()
+	var snapshot *sharedSnapshot
+	if err == nil {
+		snapshot, err = decodeSharedSnapshot(result, started)
+	}
 	if err != nil {
-		slog.Warn("reqcompress shared state delete failed", "account_id", accountID,
-			"algorithm", expected, "error", err)
+		if before != nil && slot.currentState() == before.owner {
+			before.owner.discardSharedResult(before)
+		}
+		slog.Warn("reqcompress shared state delete failed", "account_id", accountID, "algorithm", expected, "error", err)
+		return
+	}
+	if before != nil && snapshot.revision == token {
+		snapshot.owner = before.owner
+		*before = *snapshot
+		if negotiation := slot.currentState(); negotiation == before.owner {
+			negotiation.mu.Lock()
+			negotiation.sharedRevision, negotiation.sharedValue = snapshot.revision, snapshot.raw
+			negotiation.mu.Unlock()
+		}
+	} else if expected != AlgorithmNone {
+		if negotiation := slot.currentState(); negotiation == before.owner {
+			negotiation.applyShared(snapshot, true)
+		}
 	}
 }
 

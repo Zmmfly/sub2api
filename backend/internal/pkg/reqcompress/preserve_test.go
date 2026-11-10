@@ -160,16 +160,16 @@ func TestExecuteRefreshesSharedCodingForEveryAccountRequest(t *testing.T) {
 		require.Equal(t, sharedAlgorithmTTL, server.TTL(sharedAlgorithmKey(accountID)))
 	}
 
-	// Losing the shared key must not leave the UI empty indefinitely while
-	// in-memory forwarding keeps compressing; the next account request repairs it.
+	// A missing authoritative key opens a fresh negotiation rather than
+	// reviving the stale local coding without proving it still works.
 	require.NoError(t, client.Del(context.Background(), sharedAlgorithmKey(accountID)).Err())
 	resp, err := registry.Execute(accountID, newTestRequest(t, testBody()), func(attempt *http.Request) (*http.Response, error) {
-		require.Equal(t, "zstd", attempt.Header.Get("Content-Encoding"))
+		require.Equal(t, "br", attempt.Header.Get("Content-Encoding"))
 		return okResponse("ok"), nil
 	})
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
-	requireSharedAlgorithm(t, server, accountID, AlgorithmZstd)
+	requireSharedAlgorithm(t, server, accountID, AlgorithmBrotli)
 	require.Equal(t, sharedAlgorithmTTL, server.TTL(sharedAlgorithmKey(accountID)))
 }
 

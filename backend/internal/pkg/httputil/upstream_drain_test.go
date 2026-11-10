@@ -52,3 +52,46 @@ func TestUpstreamDrainReleaseDoesNotCancelCaller(t *testing.T) {
 	require.NoError(t, client.Err())
 	cancelClient()
 }
+
+func TestUpstreamClientErrRetainsOriginalCancellation(t *testing.T) {
+	for _, detached := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ordinary", true: "nested_detached"}[detached], func(t *testing.T) {
+			client, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ctx := client
+			if detached {
+				ctx = DetachUpstreamContext(DetachUpstreamContext(client))
+			}
+			require.NoError(t, UpstreamClientErr(ctx))
+			cancel()
+			require.ErrorIs(t, UpstreamClientErr(ctx), context.Canceled)
+			if detached {
+				require.NoError(t, ctx.Err(), "billing drain remains detached")
+			}
+		})
+	}
+	require.NoError(t, UpstreamClientErr(context.TODO()))
+	require.NoError(t, UpstreamClientErr(context.Background()))
+}
+
+func TestUpstreamClientErrDetectsDeadlineAndAttemptCancellation(t *testing.T) {
+	client, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	detached := DetachUpstreamContext(client)
+	require.ErrorIs(t, UpstreamClientErr(detached), context.DeadlineExceeded)
+	require.NoError(t, detached.Err())
+
+	upstream, release := NewUpstreamAttemptContext(DetachUpstreamContext(context.Background()), time.Second)
+	release()
+	require.ErrorIs(t, UpstreamClientErr(upstream), context.Canceled)
+}
+
+func TestUpstreamClientErrDoesNotEndExistingDrain(t *testing.T) {
+	client, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	upstream, release := NewUpstreamAttemptContext(DetachUpstreamContext(client), time.Second)
+	defer release()
+	cancel()
+	require.ErrorIs(t, UpstreamClientErr(upstream), context.Canceled)
+	require.NoError(t, upstream.Err(), "the in-flight attempt can still collect usage")
+}

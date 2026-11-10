@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/traffic"
 )
 
@@ -48,29 +49,53 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 	if negotiation == nil || req == nil {
 		return send(req)
 	}
-	if err := r.hydrateShared(req.Context(), accountID, negotiation); err != nil {
+	shared, sharedErr := r.syncShared(req.Context(), accountID, negotiation)
+	if sharedErr != nil {
 		// Without a readable shared snapshot, probing br again could overwrite a
-		// coding another instance already pinned. Send identity for this request
-		// and retry shared initialization on the next one.
-		slog.Warn("reqcompress shared state load failed",
-			append(requestLogFields(req, accountID, AlgorithmNone, nil), "error", err)...)
+		// coding another instance already pinned. Contention is normal; failures
+		// are rate limited so a busy account or outage cannot flood warnings.
+		fields := append(requestLogFields(req, accountID, AlgorithmNone, nil), "error", sharedErr)
+		if errors.Is(sharedErr, errSharedStateBusy) {
+			slog.Debug("reqcompress shared state busy", fields...)
+		} else if claimSharedRefreshLog(accountID, time.Now()) {
+			slog.Warn("reqcompress shared state load failed", fields...)
+		} else {
+			slog.Debug("reqcompress shared state load failed", fields...)
+		}
 		return send(req)
 	}
-	// Every account request renews a known coding, even when this particular
-	// body is too small, signed, or otherwise ineligible for compression.
-	r.refreshSharedAlgorithm(req.Context(), accountID, negotiation)
 	if !Eligible(req) {
 		return send(req)
 	}
 
-	work, ownsNegotiation := negotiation.begin(r.now())
+	work, ownsNegotiation := negotiation.begin(r.now(), shared)
 	if len(work) == 0 {
 		return send(req)
 	}
 	levels := r.compressionLevels(req.Context())
 	lastStatus := 0
 	unverifiedCandidates := false
+	var previousProbe *traffic.Collector
+	// Once a response has been discarded, a canceled retry must return an
+	// error, never that closed body. Keep its real traffic as the only attempt
+	// delivered by this request, and release any unfinished negotiation.
+	retryCancellation := func() error {
+		if previousProbe == nil {
+			return nil
+		}
+		err := httputil.UpstreamClientErr(req.Context())
+		if err != nil {
+			adoptDeliveredAttempt(req, previousProbe)
+			if ownsNegotiation {
+				negotiation.abortNegotiation(shared)
+			}
+		}
+		return err
+	}
 	for len(work) > 0 {
+		if err := retryCancellation(); err != nil {
+			return nil, err
+		}
 		algorithm := work[0]
 		work = work[1:]
 
@@ -80,7 +105,10 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 				append(requestLogFields(req, accountID, algorithm, nil), "error", err,
 					"scope", "this_request_only")...)
 			if ownsNegotiation {
-				negotiation.abortNegotiation()
+				negotiation.abortNegotiation(shared)
+			}
+			if err := retryCancellation(); err != nil {
+				return nil, err
 			}
 			return send(req)
 		}
@@ -106,6 +134,10 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 				"host", logHost(req), "method", req.Method,
 				"compressed_bytes", attemptedBytes)
 		}
+		if err := retryCancellation(); err != nil {
+			_ = attempt.Body.Close()
+			return nil, err
+		}
 		resp, err := send(attempt)
 		if resp != nil {
 			lastStatus = resp.StatusCode
@@ -116,12 +148,22 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 			// delivered a response, but its sent bytes are the request's own.
 			adoptDeliveredAttempt(req, probe)
 			if ownsNegotiation {
-				negotiation.abortNegotiation()
+				negotiation.abortNegotiation(shared)
 			}
 			logPreservedCoding(req, accountID, algorithm, negotiation, resp, "transport_error", err)
 			return resp, err
 		}
 		failureKind := inspectEncodingResponse(resp)
+		if !encodingAccepted(resp) && httputil.UpstreamClientErr(req.Context()) != nil {
+			// Inspection may block while the client disconnects. Its restored
+			// body is still readable, so return it without discarding or retrying.
+			if ownsNegotiation {
+				negotiation.abortNegotiation(shared)
+			}
+			adoptDeliveredAttempt(req, probe)
+			logPreservedCoding(req, accountID, algorithm, negotiation, resp, "request_cancelled", nil)
+			return resp, nil
+		}
 		// A bare 415 may reject the media type, not the content coding. It can
 		// guide an unverified trial, but cannot invalidate a proven coding.
 		rejected := failureKind == responseFailureContentCoding ||
@@ -130,8 +172,8 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 			if encodingAccepted(resp) {
 				adoptDeliveredAttempt(req, probe)
 				if ownsNegotiation {
-					negotiation.negotiationSucceeded(algorithm)
-					r.persistSharedAlgorithm(req.Context(), accountID, algorithm)
+					negotiation.negotiationSucceeded(algorithm, shared)
+					r.persistSharedAlgorithm(req.Context(), accountID, algorithm, shared)
 					fields := append(requestLogFields(req, accountID, algorithm, resp),
 						"original_bytes", originalBytes, "compressed_bytes", attemptedBytes)
 					if hasOriginalBytes && originalBytes > 0 {
@@ -142,8 +184,8 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 				return resp, nil
 			}
 			if !ownsNegotiation {
-				if isCodingSensitiveFailure(resp) && req.Context().Err() == nil {
-					return r.replayWithoutCoding(req, accountID, algorithm, negotiation, resp, probe, failureKind, send)
+				if isCodingSensitiveFailure(resp) {
+					return r.replayWithoutCoding(req, accountID, algorithm, negotiation, shared, resp, probe, failureKind, send)
 				}
 				// Auth, permission, rate-limit and availability failures say
 				// nothing about coding support, and a canceled caller cannot
@@ -156,7 +198,7 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 				// An auth/rate/health error also proves nothing during the
 				// initial trial. Do not upload the body four times or pin
 				// identity just because the provider is temporarily unhealthy.
-				negotiation.abortNegotiation()
+				negotiation.abortNegotiation(shared)
 				adoptDeliveredAttempt(req, probe)
 				return resp, nil
 			}
@@ -166,15 +208,20 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 			fields := append(requestLogFields(req, accountID, algorithm, resp),
 				"reason", failureKind, "error_source", "upstream_response")
 			slog.Warn("reqcompress coding unverified", append(fields, discardedAttemptLogFields(probe)...)...)
+			previousProbe = probe
 			drainAndClose(resp)
 			continue
 		}
 		slog.Warn("reqcompress coding rejected",
 			append(requestLogFields(req, accountID, algorithm, resp), discardedAttemptLogFields(probe)...)...)
+		previousProbe = probe
 		drainAndClose(resp)
+		if err := retryCancellation(); err != nil {
+			return nil, err
+		}
 		if ownsNegotiation {
 			if failureKind == responseFailureContentCoding {
-				negotiation.negotiationCandidateFailed(algorithm)
+				negotiation.negotiationCandidateFailed(algorithm, shared)
 			} else {
 				// A bare 415 can reject Content-Type for every representation.
 				// Keep this candidate unless a plain attempt actually succeeds.
@@ -184,8 +231,8 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 		}
 		// The settled coding broke: drop it and, when this request becomes the
 		// owner, try the remaining codings immediately.
-		next, owns := negotiation.retireSettled(algorithm)
-		r.deleteSharedAlgorithm(req.Context(), accountID, algorithm)
+		next, owns := negotiation.retireSettled(algorithm, shared)
+		r.deleteSharedAlgorithm(req.Context(), accountID, algorithm, shared)
 		if !owns {
 			break
 		}
@@ -195,6 +242,9 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 		ownsNegotiation = true
 		work = append(work, next...)
 	}
+	if err := retryCancellation(); err != nil {
+		return nil, err
+	}
 	identityResp, identityErr := send(req)
 	if ownsNegotiation {
 		if !unverifiedCandidates || (identityErr == nil && encodingAccepted(identityResp)) {
@@ -202,23 +252,27 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 			if unverifiedCandidates {
 				reason = "initial_identity_accepted"
 				retryAt := r.now().Add(ambiguousIdentityRetryTTL)
-				negotiation.pinIdentityUntil(retryAt)
-				r.persistSharedIdentity(req.Context(), accountID, negotiation, retryAt, AlgorithmNone)
+				negotiation.pinIdentityUntil(retryAt, shared)
+				r.persistSharedIdentity(req.Context(), accountID, negotiation, retryAt, AlgorithmNone, shared)
 			} else {
-				negotiation.pinIdentity()
+				negotiation.pinIdentity(shared)
 			}
 			fields := append(requestLogFields(req, accountID, AlgorithmNone, identityResp),
 				"reason", reason, "last_status", lastStatus)
+			identityPinned, remainingTTL := r.identityOutcome(accountID, negotiation)
 			if unverifiedCandidates {
-				fields = append(fields, "identity_ttl_seconds", int(ambiguousIdentityRetryTTL/time.Second))
+				fields = append(fields, "identity_pinned", identityPinned,
+					"identity_ttl_seconds", int((remainingTTL+time.Second-1)/time.Second))
 			}
 			slog.Warn("reqcompress no coding accepted", fields...)
-			slog.Warn("reqcompress pinned identity", fields...)
+			if identityPinned {
+				slog.Warn("reqcompress pinned identity", fields...)
+			}
 		} else {
 			// Neither compressed nor plain attempts worked: preserve the
 			// unverified candidates for a later request instead of turning
 			// a transient upstream/read failure into a permanent downgrade.
-			negotiation.abortNegotiation()
+			negotiation.abortNegotiation(shared)
 		}
 	}
 	return identityResp, identityErr
@@ -233,19 +287,32 @@ func (r *Registry) Execute(accountID int64, req *http.Request, send SendFunc) (*
 // afterwards the remaining candidates, led by the failed coding, are probed
 // again. A plain failure proves nothing against the coding, which stays
 // settled, and is delivered in place of the coded failure.
-func (r *Registry) replayWithoutCoding(req *http.Request, accountID int64, algorithm Algorithm, negotiation *state,
+func (r *Registry) replayWithoutCoding(req *http.Request, accountID int64, algorithm Algorithm, negotiation *state, shared *sharedSnapshot,
 	coded *http.Response, probe *traffic.Collector, reason string, send SendFunc) (*http.Response, error) {
+	if httputil.UpstreamClientErr(req.Context()) != nil {
+		adoptDeliveredAttempt(req, probe)
+		logPreservedCoding(req, accountID, algorithm, negotiation, coded, "request_cancelled", nil)
+		return coded, nil
+	}
 	fields := append(requestLogFields(req, accountID, algorithm, coded), discardedAttemptLogFields(probe)...)
 	drainAndClose(coded)
+	if err := httputil.UpstreamClientErr(req.Context()); err != nil {
+		// Draining/closing can outlive the client. This attempt was already
+		// closed, so return cancellation rather than an unusable response.
+		adoptDeliveredAttempt(req, probe)
+		logPreservedCoding(req, accountID, algorithm, negotiation, coded, "request_cancelled", err)
+		return nil, err
+	}
 	resp, err := send(req)
 	pinned := false
 	if err == nil && encodingAccepted(resp) {
 		retryAt := r.now().Add(ambiguousIdentityRetryTTL)
-		if pinned = negotiation.demoteSettled(algorithm, retryAt); pinned {
-			r.persistSharedIdentity(req.Context(), accountID, negotiation, retryAt, algorithm)
+		if pinned = negotiation.demoteSettled(algorithm, retryAt, shared); pinned {
+			r.persistSharedIdentity(req.Context(), accountID, negotiation, retryAt, algorithm, shared)
 		}
 	}
-	logIdentityReplay(req, negotiation, algorithm, fields, reason, resp, err, pinned)
+	pinned, remainingTTL := r.identityOutcome(accountID, negotiation)
+	logIdentityReplay(req, negotiation, algorithm, fields, reason, resp, err, pinned, remainingTTL)
 	return resp, err
 }
 

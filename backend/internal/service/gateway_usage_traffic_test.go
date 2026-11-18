@@ -94,14 +94,30 @@ func TestRecordUsageTraffic_BillingCompletesBeforeFinalize(t *testing.T) {
 				go func() {
 					if openAI {
 						svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+						// Use a recognized fallback model: adding an arbitrary map key does not
+						// opt it into getFallbackPricing's model allowlist. Rates are test-local.
+						svc.billingService.fallbackPrices["gpt-6-luna"] = &ModelPricing{
+							InputPricePerToken: 1e-6, OutputPricePerToken: 2e-6,
+							CacheCreationPriceExplicit:    true,
+							CacheCreationPricePerToken:    3e-6,
+							CacheCreation12hPricePerToken: float64Ptr(6e-6),
+						}
 						done <- svc.RecordUsage(ctx, &OpenAIRecordUsageInput{
-							Result: &OpenAIForwardResult{RequestID: "traffic-openai", Model: "gpt-4o", Usage: OpenAIUsage{InputTokens: 20, OutputTokens: 10}},
+							Result: &OpenAIForwardResult{RequestID: "traffic-openai", Model: "gpt-6-luna", Usage: OpenAIUsage{
+								InputTokens: 70, OutputTokens: 10, CacheCreationInputTokens: 50,
+								CacheCreation30mInputTokens: 20, CacheCreation12hInputTokens: 30,
+							}},
 							APIKey: &APIKey{ID: 1}, User: &User{ID: 2}, Account: &Account{ID: 3},
 						})
 					} else {
 						svc := newGatewayRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{})
 						done <- svc.RecordUsage(ctx, &RecordUsageInput{
-							Result: &ForwardResult{RequestID: "traffic-claude", Model: "claude-sonnet-4", Usage: ClaudeUsage{InputTokens: 20, OutputTokens: 10}},
+							Result: &ForwardResult{RequestID: "traffic-claude", Model: "claude-sonnet-4", Usage: ClaudeUsage{
+								InputTokens: 20, OutputTokens: 10,
+								CacheCreation5mTokens: 20, CacheCreation1hTokens: 30,
+								// Explicit zero stays raw in the log, while billing uses the TTL details.
+								cacheCreationInputTokensPresent: true,
+							}},
 							APIKey: &APIKey{ID: 1}, User: &User{ID: 2}, Account: &Account{ID: 3},
 						})
 					}
@@ -127,6 +143,22 @@ func TestRecordUsageTraffic_BillingCompletesBeforeFinalize(t *testing.T) {
 				require.Equal(t, 1, usageRepo.calls)
 				require.NoError(t, usageRepo.lastCtxErr)
 				log := usageRepo.lastLog
+				require.Equal(t, 20, log.InputTokens)
+				if openAI {
+					require.InDelta(t, 20*3e-6+30*6e-6, log.CacheCreationCost, 1e-12)
+					require.Equal(t, 50, log.CacheCreationTokens)
+					require.Equal(t, 20, log.CacheCreation30mTokens)
+					require.Equal(t, 30, log.CacheCreation12hTokens)
+					require.Zero(t, log.CacheCreation5mTokens)
+					require.Zero(t, log.CacheCreation1hTokens)
+				} else {
+					require.Zero(t, log.CacheCreationTokens, "do not replace explicit raw zero with the billing projection")
+					require.Equal(t, 20, log.CacheCreation5mTokens)
+					require.Equal(t, 30, log.CacheCreation1hTokens)
+					require.Zero(t, log.CacheCreation30mTokens)
+					require.Zero(t, log.CacheCreation12hTokens)
+				}
+				require.Positive(t, log.CacheCreationCost, "TTL cache writes must still be priced before traffic finalize")
 				require.NotNil(t, log.Traffic)
 				require.EqualValues(t, 220, *log.Traffic.Upstream.Request.OriginalBytes)
 				require.EqualValues(t, 130, *log.Traffic.Upstream.Request.ActualBytes)
@@ -386,4 +418,46 @@ func TestWriteUsageTraffic_FinalizeRegistrationRaceWritesExactlyOnce(t *testing.
 	}
 	pool.Stop()
 	require.EqualValues(t, 64, writes.Load())
+}
+
+// The deferred traffic callback must preserve raw cache fields, not rebuild them
+// from a billing projection or retain the caller's mutable UsageLog.
+func TestWriteUsageTraffic_FinalizeFreezesSeparateCacheTTLBuckets(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		log  UsageLog
+	}{
+		{"native_explicit_zero", UsageLog{CacheCreationTokens: 0, CacheCreation5mTokens: 20, CacheCreation1hTokens: 30}},
+		{"openai", UsageLog{CacheCreationTokens: 50, CacheCreation30mTokens: 20, CacheCreation12hTokens: 30}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			collector := traffic.NewCollector()
+			response := collector.Begin(traffic.DownstreamResponse, true)
+			response.AddOriginal(200)
+			response.AddActual(35)
+			repo := &openAIRecordUsageLogRepoStub{}
+			log := tc.log
+			writeUsageLogBestEffort(traffic.WithCollector(context.Background(), collector), repo, &log, "test")
+			require.Zero(t, repo.calls)
+			log.CacheCreationTokens = 999
+			log.CacheCreation5mTokens, log.CacheCreation1hTokens = 111, 222
+			log.CacheCreation30mTokens, log.CacheCreation12hTokens = 333, 444
+			response.AddActual(8) // compression trailer is measured after the log is frozen
+			response.CompleteOriginal()
+			response.CompleteActual()
+			collector.Finalize()
+			collector.Finalize()
+			require.Equal(t, 1, repo.calls)
+			got := repo.lastLog
+			require.Equal(t, tc.log.CacheCreationTokens, got.CacheCreationTokens)
+			require.Equal(t, tc.log.CacheCreation5mTokens, got.CacheCreation5mTokens)
+			require.Equal(t, tc.log.CacheCreation1hTokens, got.CacheCreation1hTokens)
+			require.Equal(t, tc.log.CacheCreation30mTokens, got.CacheCreation30mTokens)
+			require.Equal(t, tc.log.CacheCreation12hTokens, got.CacheCreation12hTokens)
+			require.EqualValues(t, 200, *got.Traffic.Downstream.Response.OriginalBytes)
+			require.EqualValues(t, 43, *got.Traffic.Downstream.Response.ActualBytes)
+			require.True(t, got.Traffic.Downstream.Response.Compressed)
+			require.Nil(t, log.Traffic, "finalize must not mutate the caller's log")
+		})
+	}
 }

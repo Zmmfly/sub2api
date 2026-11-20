@@ -233,3 +233,40 @@ func TestTrafficNoBodyStatusAndHead(t *testing.T) {
 		}
 	}
 }
+
+func TestTrafficRequestFieldValidationPreservesCompressedByteCounts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	original := []byte(`{"model":"gpt-6.2-sol","input":"Hello"}`)
+	for _, encoding := range []string{"identity", "gzip", "zstd"} {
+		t.Run(encoding, func(t *testing.T) {
+			encoded := original
+			if encoding != "identity" {
+				encoded = encodeTrafficBody(t, encoding, original)
+			}
+			engine := gin.New()
+			engine.Use(TrafficCapture(), RequestBodyLimit(1024), RejectConflictingRequestFields())
+			var usage *traffic.Usage
+			engine.POST("/v1/responses", func(c *gin.Context) {
+				traffic.AfterFinalize(c.Request.Context(), func(u *traffic.Usage) { usage = u })
+				decoded, err := pkghttputil.ReadLenientJSONRequestBodyWithPrealloc(c.Request, 1024)
+				if err != nil || !bytes.Equal(decoded, original) {
+					t.Fatalf("handler did not receive the decoded request: %s, %v", decoded, err)
+				}
+				c.Status(http.StatusNoContent)
+			})
+			req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(encoded))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Content-Encoding", encoding)
+			res := httptest.NewRecorder()
+			engine.ServeHTTP(res, req)
+			if res.Code != http.StatusNoContent || usage == nil {
+				t.Fatalf("request failed or traffic was not finalized: %d, %s", res.Code, res.Body.String())
+			}
+			assertTrafficCount(t, usage.Downstream.Request.ActualBytes, len(encoded))
+			assertTrafficCount(t, usage.Downstream.Request.OriginalBytes, len(original))
+			if usage.Downstream.Request.Compressed != (encoding != "identity") {
+				t.Fatalf("incorrect compression flag: %v", usage.Downstream.Request.Compressed)
+			}
+		})
+	}
+}

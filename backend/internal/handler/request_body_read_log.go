@@ -11,8 +11,5 @@ import (
 // The shared request body reader logs failures once with payload-free diagnostics.
 func requestBodyReadFailure(_ *zap.Logger, req *http.Request, err error) (int, string) {
 	failure := pkghttputil.DescribeRequestBodyReadFailure(req, err)
-	if failure.Kind == pkghttputil.RequestBodyReadErrorMaxBytes {
-		return failure.Status, buildBodyTooLargeMessage(failure.MaxBytesLimit)
-	}
-	return failure.Status, failure.Message
+	return failure.Status, failure.ClientMessage()
 }

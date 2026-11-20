@@ -148,7 +148,7 @@ func TestRequestBodyReadFailureKeepsBodyLimitMessageWithoutLogging(t *testing.T)
 	log, logs := newObservedLogger(t)
 	status, message := requestBodyReadFailure(log, nil, &http.MaxBytesError{Limit: 2 << 20})
 	require.Equal(t, http.StatusRequestEntityTooLarge, status)
-	require.Equal(t, buildBodyTooLargeMessage(2<<20), message)
+	require.Equal(t, pkghttputil.BodyTooLargeMessage(2<<20), message)
 	require.Empty(t, logs.All())
 }
 

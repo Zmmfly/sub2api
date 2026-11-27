@@ -220,6 +220,39 @@ func (h *OpsHandler) GetDashboardErrorDistribution(c *gin.Context) {
 	response.Success(c, data)
 }
 
+// GetDashboardTopTrafficUsers ranks users by measured traffic in the dashboard window.
+// GET /api/v1/admin/ops/dashboard/top-traffic-users
+func (h *OpsHandler) GetDashboardTopTrafficUsers(c *gin.Context) {
+	if h.opsService == nil {
+		response.Error(c, http.StatusServiceUnavailable, "Ops service not available")
+		return
+	}
+	startTime, endTime, err := parseOpsTimeRange(c, "1h")
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	filter := &service.OpsDashboardFilter{
+		StartTime: startTime,
+		EndTime:   endTime,
+		Platform:  strings.TrimSpace(c.Query("platform")),
+	}
+	if raw := strings.TrimSpace(c.Query("group_id")); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id <= 0 {
+			response.BadRequest(c, "Invalid group_id")
+			return
+		}
+		filter.GroupID = &id
+	}
+	users, err := h.opsService.GetTopTrafficUsers(c.Request.Context(), filter)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, users)
+}
+
 // GetDashboardOpenAITokenStats returns token efficiency stats for all platforms, grouped by model.
 // The endpoint name is retained for compatibility; platform and group_id optionally narrow the scope.
 // GET /api/v1/admin/ops/dashboard/openai-token-stats

@@ -46,6 +46,8 @@ func NewUsageHandler(
 type CreateUsageCleanupTaskRequest struct {
 	StartDate   string  `json:"start_date"`
 	EndDate     string  `json:"end_date"`
+	StartTime   string  `json:"start_time"`
+	EndTime     string  `json:"end_time"`
 	UserID      *int64  `json:"user_id"`
 	APIKeyID    *int64  `json:"api_key_id"`
 	AccountID   *int64  `json:"account_id"`
@@ -159,27 +161,30 @@ func (h *UsageHandler) List(c *gin.Context) {
 		upstreamModelMismatch = &value
 	}
 
-	// Parse date range
-	var startTime, endTime *time.Time
-	userTZ := c.Query("timezone") // Get user's timezone from request
-	if startDateStr := c.Query("start_date"); startDateStr != "" {
-		t, err := timezone.ParseInUserLocation("2006-01-02", startDateStr, userTZ)
-		if err != nil {
-			response.BadRequest(c, "Invalid start_date format, use YYYY-MM-DD")
-			return
-		}
-		startTime = &t
+	startTime, endTime, err := parseUsageTimestampRange(c.Query("start_time"), c.Query("end_time"))
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
 	}
-
-	if endDateStr := c.Query("end_date"); endDateStr != "" {
-		t, err := timezone.ParseInUserLocation("2006-01-02", endDateStr, userTZ)
-		if err != nil {
-			response.BadRequest(c, "Invalid end_date format, use YYYY-MM-DD")
-			return
+	if startTime == nil {
+		userTZ := c.Query("timezone")
+		if startDateStr := c.Query("start_date"); startDateStr != "" {
+			t, err := timezone.ParseInUserLocation("2006-01-02", startDateStr, userTZ)
+			if err != nil {
+				response.BadRequest(c, "Invalid start_date format, use YYYY-MM-DD")
+				return
+			}
+			startTime = &t
 		}
-		// Use half-open range [start, end), move to next calendar day start (DST-safe).
-		t = t.AddDate(0, 0, 1)
-		endTime = &t
+		if endDateStr := c.Query("end_date"); endDateStr != "" {
+			t, err := timezone.ParseInUserLocation("2006-01-02", endDateStr, userTZ)
+			if err != nil {
+				response.BadRequest(c, "Invalid end_date format, use YYYY-MM-DD")
+				return
+			}
+			t = t.AddDate(0, 0, 1)
+			endTime = &t
+		}
 	}
 
 	params := pagination.PaginationParams{
@@ -314,7 +319,14 @@ func (h *UsageHandler) Stats(c *gin.Context) {
 	startDateStr := c.Query("start_date")
 	endDateStr := c.Query("end_date")
 
-	if startDateStr != "" && endDateStr != "" {
+	exactStart, exactEnd, err := parseUsageTimestampRange(c.Query("start_time"), c.Query("end_time"))
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	if exactStart != nil {
+		startTime, endTime = *exactStart, *exactEnd
+	} else if startDateStr != "" && endDateStr != "" {
 		var err error
 		startTime, err = timezone.ParseInUserLocation("2006-01-02", startDateStr, userTZ)
 		if err != nil {
@@ -506,24 +518,35 @@ func (h *UsageHandler) CreateCleanupTask(c *gin.Context) {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
-	req.StartDate = strings.TrimSpace(req.StartDate)
-	req.EndDate = strings.TrimSpace(req.EndDate)
-	if req.StartDate == "" || req.EndDate == "" {
-		response.BadRequest(c, "start_date and end_date are required")
-		return
-	}
-
-	startTime, err := timezone.ParseInUserLocation("2006-01-02", req.StartDate, req.Timezone)
+	exactStart, exactEnd, err := parseUsageTimestampRange(req.StartTime, req.EndTime)
 	if err != nil {
-		response.BadRequest(c, "Invalid start_date format, use YYYY-MM-DD")
+		response.BadRequest(c, err.Error())
 		return
 	}
-	endTime, err := timezone.ParseInUserLocation("2006-01-02", req.EndDate, req.Timezone)
-	if err != nil {
-		response.BadRequest(c, "Invalid end_date format, use YYYY-MM-DD")
-		return
+	var startTime, endTime time.Time
+	if exactStart != nil {
+		startTime = *exactStart
+		// Cleanup uses an inclusive upper bound at PostgreSQL's microsecond precision.
+		endTime = exactEnd.Add(-time.Nanosecond).Truncate(time.Microsecond)
+	} else {
+		req.StartDate = strings.TrimSpace(req.StartDate)
+		req.EndDate = strings.TrimSpace(req.EndDate)
+		if req.StartDate == "" || req.EndDate == "" {
+			response.BadRequest(c, "start_date and end_date are required")
+			return
+		}
+		startTime, err = timezone.ParseInUserLocation("2006-01-02", req.StartDate, req.Timezone)
+		if err != nil {
+			response.BadRequest(c, "Invalid start_date format, use YYYY-MM-DD")
+			return
+		}
+		endTime, err = timezone.ParseInUserLocation("2006-01-02", req.EndDate, req.Timezone)
+		if err != nil {
+			response.BadRequest(c, "Invalid end_date format, use YYYY-MM-DD")
+			return
+		}
+		endTime = endTime.Add(24*time.Hour - time.Nanosecond)
 	}
-	endTime = endTime.Add(24*time.Hour - time.Nanosecond)
 
 	var requestType *int16
 	stream := req.Stream

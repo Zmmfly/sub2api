@@ -194,6 +194,10 @@ export default {
         '30d': '近30天',
         custom: '自定义'
       },
+      topTrafficUsers: {
+        title: 'Top 10 流量消耗用户',
+        loadFailed: '加载流量消耗排行失败'
+      },
       openaiTokenStats: {
         title: 'Token 请求统计',
         viewModeTopN: 'TopN',
@@ -796,6 +800,8 @@ export default {
         dashboardCards: '仪表盘卡片',
         displayAlertEvents: '展示告警事件',
         displayAlertEventsHint: '控制运维监控仪表盘中告警事件卡片是否显示，默认开启。',
+        displayTopTrafficUsers: '展示 Top 10 流量消耗用户',
+        displayTopTrafficUsersHint: '按所选时间范围和筛选条件汇总使用记录中的实际流量，默认关闭。',
         displayOpenAITokenStats: '展示 Token 请求统计',
         displayOpenAITokenStatsHint: '按模型统计所有平台的 Token 请求，支持平台和分组筛选，默认关闭。',
         autoRefreshCountdown: '自动刷新：{seconds}s',

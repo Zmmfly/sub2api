@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
@@ -44,6 +45,23 @@ func newAdminUsageRequestTypeTestRouter(repo *adminUsageRepoCapture) *gin.Engine
 	router.GET("/admin/usage", handler.List)
 	router.GET("/admin/usage/stats", handler.Stats)
 	return router
+}
+
+func TestAdminUsageListAndStatsUseExactTimeWindow(t *testing.T) {
+	repo := &adminUsageRepoCapture{}
+	router := newAdminUsageRequestTypeTestRouter(repo)
+	query := "?start_date=2026-07-01&end_date=2026-07-02&start_time=2026-07-01T08:15:00Z&end_time=2026-07-01T08:31:00Z&nocache=1"
+	for _, path := range []string{"/admin/usage", "/admin/usage/stats"} {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path+query, nil))
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	start := time.Date(2026, 7, 1, 8, 15, 0, 0, time.UTC)
+	end := time.Date(2026, 7, 1, 8, 31, 0, 0, time.UTC)
+	for _, filters := range []usagestats.UsageLogFilters{repo.listFilters, repo.statsFilters} {
+		require.Equal(t, &start, filters.StartTime)
+		require.Equal(t, &end, filters.EndTime)
+	}
 }
 
 func TestAdminUsageListRequestTypePriority(t *testing.T) {

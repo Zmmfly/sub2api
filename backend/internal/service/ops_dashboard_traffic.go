@@ -1,5 +1,12 @@
 package service
 
+type OpsTopTrafficUser struct {
+	UserID            int64  `json:"user_id"`
+	Username          string `json:"username"`
+	Email             string `json:"email"`
+	TotalTrafficBytes int64  `json:"total_traffic_bytes"`
+}
+
 // OpsTrafficSummary covers finalized gateway HTTP requests and client
 // WebSocket turns in the independent traffic ledger, including failures and
 // all their upstream retry attempts. It is independent of usage/error logging.

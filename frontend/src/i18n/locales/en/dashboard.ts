@@ -1068,6 +1068,9 @@ export default {
     custom: 'Custom',
     startDate: 'Start Date',
     endDate: 'End Date',
+    startTime: 'Start time (24-hour)',
+    endTime: 'End time (24-hour)',
+    invalidCustomRange: 'Enter valid dates and HH:mm times, with the end at or after the start.',
     apply: 'Apply',
     selectDateRange: 'Select date range'
   },

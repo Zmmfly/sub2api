@@ -18,20 +18,29 @@ import (
 
 func TestParseTimeRange(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	req := httptest.NewRequest(http.MethodGet, "/?start_date=2024-01-01&end_date=2024-01-02&timezone=UTC", nil)
-	c.Request = req
+	parse := func(path string) (time.Time, time.Time, error) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodGet, path, nil)
+		return parseTimeRange(c)
+	}
 
-	start, end := parseTimeRange(c)
+	start, end, err := parse("/?start_date=2024-01-01&end_date=2024-01-02&timezone=UTC")
+	require.NoError(t, err)
 	require.Equal(t, time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), start)
 	require.Equal(t, time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC), end)
 
-	req = httptest.NewRequest(http.MethodGet, "/?start_date=bad&timezone=UTC", nil)
-	c.Request = req
-	start, end = parseTimeRange(c)
+	start, end, err = parse("/?start_date=bad&timezone=UTC")
+	require.NoError(t, err)
 	require.False(t, start.IsZero())
 	require.False(t, end.IsZero())
+
+	start, end, err = parse("/?start_date=2024-01-01&end_date=2024-01-02&start_time=2024-01-02T00:15:00Z&end_time=2024-01-02T00:30:00Z&timezone=Asia%2FTaipei")
+	require.NoError(t, err)
+	require.Equal(t, "2024-01-02T08:15:00+08:00", start.Format(time.RFC3339))
+	require.Equal(t, "2024-01-02T08:30:00+08:00", end.Format(time.RFC3339))
+
+	_, _, err = parse("/?start_time=2024-01-02T00:15:00Z")
+	require.Error(t, err)
 }
 
 func TestParseOpsViewParam(t *testing.T) {

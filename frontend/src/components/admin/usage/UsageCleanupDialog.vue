@@ -10,6 +10,10 @@
         @change="noop"
       />
 
+      <p v-if="localFilters.start_time && localFilters.end_time" class="text-sm text-gray-600 dark:text-gray-300">
+        {{ t('admin.usage.cleanup.range') }} {{ formatDateTime(localFilters.start_time) }} – {{ formatDateTime(new Date(Date.parse(localFilters.end_time) - 60_000).toISOString()) }}
+      </p>
+
       <div class="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
         {{ t('admin.usage.cleanup.warning') }}
       </div>
@@ -220,7 +224,7 @@ const formatDateTime = (value?: string | null) => {
   if (!value) return '--'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString()
+  return date.toLocaleString(undefined, { hourCycle: 'h23' })
 }
 
 const formatRange = (task: UsageCleanupTask) => {
@@ -298,6 +302,8 @@ const buildPayload = (): CreateUsageCleanupTaskRequest | null => {
   const payload: CreateUsageCleanupTaskRequest = {
     start_date: localStartDate.value,
     end_date: localEndDate.value,
+    start_time: localFilters.value.start_time,
+    end_time: localFilters.value.end_time,
     timezone: getUserTimezone()
   }
 

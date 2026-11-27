@@ -10,6 +10,16 @@ import (
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
+func (s *OpsService) GetTopTrafficUsers(ctx context.Context, filter *OpsDashboardFilter) ([]OpsTopTrafficUser, error) {
+	if err := s.RequireMonitoringEnabled(ctx); err != nil {
+		return nil, err
+	}
+	if s.opsRepo == nil {
+		return nil, infraerrors.ServiceUnavailable("OPS_REPO_UNAVAILABLE", "Ops repository not available")
+	}
+	return s.opsRepo.GetTopTrafficUsers(ctx, filter)
+}
+
 func (s *OpsService) GetDashboardOverview(ctx context.Context, filter *OpsDashboardFilter) (*OpsDashboardOverview, error) {
 	if err := s.RequireMonitoringEnabled(ctx); err != nil {
 		return nil, err

@@ -1072,6 +1072,9 @@ export default {
     custom: '自定义',
     startDate: '开始日期',
     endDate: '结束日期',
+    startTime: '开始时间（24 小时制）',
+    endTime: '结束时间（24 小时制）',
+    invalidCustomRange: '请输入有效的日期和 HH:mm 时间，结束时间需等于或晚于开始时间。',
     apply: '应用',
     selectDateRange: '选择日期范围'
   },

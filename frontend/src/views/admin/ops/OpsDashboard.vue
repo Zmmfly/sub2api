@@ -84,6 +84,12 @@
         />
       </div>
 
+      <OpsTopTrafficUsersCard
+        v-if="opsEnabled && showTopTrafficUsers && overview && !(loading && !hasLoadedOnce)"
+        :overview="overview"
+        :refresh-token="dashboardRefreshToken"
+      />
+
       <!-- Row: Token Stats -->
       <div v-if="opsEnabled && showOpenAITokenStats && !(loading && !hasLoadedOnce)" class="grid grid-cols-1 gap-6">
         <OpsOpenAITokenStatsCard
@@ -168,6 +174,7 @@ import OpsLatencyChart from './components/OpsLatencyChart.vue'
 import OpsThroughputTrendChart from './components/OpsThroughputTrendChart.vue'
 import OpsSwitchRateTrendChart from './components/OpsSwitchRateTrendChart.vue'
 import OpsAlertEventsCard from './components/OpsAlertEventsCard.vue'
+import OpsTopTrafficUsersCard from './components/OpsTopTrafficUsersCard.vue'
 import OpsOpenAITokenStatsCard from './components/OpsOpenAITokenStatsCard.vue'
 import OpsSystemLogTable from './components/OpsSystemLogTable.vue'
 import OpsRequestDetailsModal, { type OpsRequestDetailsPreset } from './components/OpsRequestDetailsModal.vue'
@@ -393,6 +400,7 @@ applyRouteQueryToState()
 
 // Auto refresh settings
 const showAlertEvents = ref(true)
+const showTopTrafficUsers = ref(false)
 const showOpenAITokenStats = ref(false)
 const autoRefreshEnabled = ref(false)
 const autoRefreshIntervalMs = ref(30000) // default 30 seconds
@@ -426,6 +434,7 @@ async function loadDashboardAdvancedSettings() {
   try {
     const settings = await opsAPI.getAdvancedSettings()
     showAlertEvents.value = settings.display_alert_events
+    showTopTrafficUsers.value = settings.display_top_traffic_users
     showOpenAITokenStats.value = settings.display_openai_token_stats
     autoRefreshEnabled.value = settings.auto_refresh_enabled
     autoRefreshIntervalMs.value = settings.auto_refresh_interval_seconds * 1000
@@ -433,6 +442,7 @@ async function loadDashboardAdvancedSettings() {
   } catch (err) {
     console.error('[OpsDashboard] Failed to load dashboard advanced settings', err)
     showAlertEvents.value = true
+    showTopTrafficUsers.value = false
     showOpenAITokenStats.value = false
     autoRefreshEnabled.value = false
     autoRefreshIntervalMs.value = 30000

@@ -11,6 +11,9 @@
               <DateRangePicker
                 v-model:start-date="startDate"
                 v-model:end-date="endDate"
+                :start-time="filters.start_time"
+                :end-time="filters.end_time"
+                allow-time
                 @change="onDateRangeChange"
               />
             </div>
@@ -242,6 +245,10 @@ const balanceHistoryUser = ref<AdminUser | null>(null)
 
 const breakdownFilters = computed(() => {
   const f: Record<string, any> = {}
+  if (filters.value.start_time && filters.value.end_time) {
+    f.start_time = filters.value.start_time
+    f.end_time = filters.value.end_time
+  }
   if (filters.value.user_id) f.user_id = filters.value.user_id
   if (filters.value.api_key_id) f.api_key_id = filters.value.api_key_id
   if (filters.value.account_id) f.account_id = filters.value.account_id
@@ -332,6 +339,7 @@ const applyRouteQueryFilters = () => {
 
   filters.value = {
     ...filters.value,
+    ...(queryStartDate || queryEndDate ? { start_time: undefined, end_time: undefined } : {}),
     user_id: queryUserId,
     start_date: startDate.value,
     end_date: endDate.value
@@ -359,13 +367,15 @@ const loadRouteUserFilterLabel = async () => {
   }
 }
 
-const onDateRangeChange = (range: { startDate: string; endDate: string; preset: string | null }) => {
+const onDateRangeChange = (range: { startDate: string; endDate: string; startTime?: string; endTime?: string }) => {
   startDate.value = range.startDate
   endDate.value = range.endDate
   filters.value = {
     ...filters.value,
     start_date: range.startDate,
-    end_date: range.endDate
+    end_date: range.endDate,
+    start_time: range.startTime,
+    end_time: range.endTime
   }
   granularity.value = getGranularityForRange(range.startDate, range.endDate)
   applyFilters()
@@ -446,6 +456,8 @@ const loadModelStats = async (source: ModelDistributionSource, force = false) =>
     const baseParams = {
       start_date: filters.value.start_date || startDate.value,
       end_date: filters.value.end_date || endDate.value,
+      start_time: filters.value.start_time,
+      end_time: filters.value.end_time,
       user_id: filters.value.user_id,
       model: filters.value.model,
       api_key_id: filters.value.api_key_id,
@@ -496,6 +508,8 @@ const loadChartData = async () => {
     const snapshot = await adminAPI.dashboard.getSnapshotV2({
       start_date: filters.value.start_date || startDate.value,
       end_date: filters.value.end_date || endDate.value,
+      start_time: filters.value.start_time,
+      end_time: filters.value.end_time,
       granularity: granularity.value,
       user_id: filters.value.user_id,
       model: filters.value.model,
@@ -824,8 +838,8 @@ const loadAdminErrors = async () => {
       page: errPage.value,
       page_size: errPageSize.value,
       view: 'all',
-      start_time: toRFC3339(filters.value.start_date),
-      end_time: toRFC3339(filters.value.end_date, true),
+      start_time: filters.value.start_time ?? toRFC3339(filters.value.start_date),
+      end_time: filters.value.end_time ?? toRFC3339(filters.value.end_date, true),
       user_id: filters.value.user_id ?? undefined,
       api_key_id: filters.value.api_key_id ?? undefined,
       account_id: filters.value.account_id ?? undefined,

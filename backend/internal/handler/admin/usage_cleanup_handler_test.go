@@ -351,6 +351,24 @@ func TestUsageHandlerCreateCleanupTaskSuccess(t *testing.T) {
 	require.True(t, created.Filters.EndTime.Equal(end))
 }
 
+func TestUsageHandlerCleanupUsesExactTimestampBounds(t *testing.T) {
+	repo := &cleanupRepoStub{}
+	cfg := &config.Config{UsageCleanup: config.UsageCleanupConfig{Enabled: true, MaxRangeDays: 31}}
+	router := setupCleanupRouter(service.NewUsageCleanupService(repo, nil, nil, cfg), 99)
+	body := `{"start_date":"2026-07-01","end_date":"2026-07-02","start_time":"2026-07-01T08:15:00Z","end_time":"2026-07-01T08:31:00Z"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/usage/cleanup-tasks", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	require.Len(t, repo.created, 1)
+	require.Equal(t, time.Date(2026, 7, 1, 8, 15, 0, 0, time.UTC), repo.created[0].Filters.StartTime)
+	require.Equal(t, time.Date(2026, 7, 1, 8, 30, 59, 999999000, time.UTC), repo.created[0].Filters.EndTime)
+}
+
 func TestUsageHandlerListCleanupTasksUnavailable(t *testing.T) {
 	router := setupCleanupRouter(nil, 0)
 

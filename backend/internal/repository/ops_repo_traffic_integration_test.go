@@ -5,6 +5,7 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -12,6 +13,69 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+func TestOpsRepositoryGetTopTrafficUsers(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+	group := mustCreateGroup(t, client, &service.Group{Name: "traffic-ranking", Platform: service.PlatformOpenAI})
+	account := mustCreateAccount(t, client, &service.Account{Name: "traffic-ranking"})
+	start := time.Date(2026, 11, 1, 8, 15, 0, 0, time.UTC)
+	end := start.Add(30 * time.Minute)
+	t.Cleanup(func() {
+		_, err := integrationDB.ExecContext(ctx, "DELETE FROM accounts WHERE id = $1", account.ID)
+		require.NoError(t, err)
+		_, err = integrationDB.ExecContext(ctx, "DELETE FROM groups WHERE id = $1", group.ID)
+		require.NoError(t, err)
+	})
+
+	var expected []service.OpsTopTrafficUser
+	for rank := 1; rank <= 11; rank++ {
+		user := mustCreateUser(t, client, &service.User{Username: fmt.Sprintf("traffic-user-%d", rank)})
+		key := mustCreateApiKey(t, client, &service.APIKey{UserID: user.ID})
+		t.Cleanup(func() {
+			_, err := integrationDB.ExecContext(ctx, "DELETE FROM usage_logs WHERE user_id = $1", user.ID)
+			require.NoError(t, err)
+			_, err = integrationDB.ExecContext(ctx, "DELETE FROM api_keys WHERE id = $1", key.ID)
+			require.NoError(t, err)
+			_, err = integrationDB.ExecContext(ctx, "DELETE FROM users WHERE id = $1", user.ID)
+			require.NoError(t, err)
+		})
+		insert := func(at time.Time, groupID any, bytes int) {
+			t.Helper()
+			observation := fmt.Sprintf(`{"upstream":{"request":{"original_bytes":52000,"actual_bytes":%d}},"downstream":{"response":{"actual_bytes":5}}}`, bytes)
+			_, err := integrationDB.ExecContext(ctx, `INSERT INTO usage_logs (user_id, api_key_id, account_id, group_id, model, created_at, traffic)
+				VALUES ($1, $2, $3, $4, 'traffic-ranking', $5, $6::jsonb)`, user.ID, key.ID, account.ID, groupID, at, observation)
+			require.NoError(t, err)
+		}
+		insert(start, group.ID, rank*100)
+		total := int64(rank*100 + 5)
+		if rank == 1 {
+			insert(start, nil, 200000)
+			insert(end, group.ID, 300000)
+			continue
+		}
+		if rank == 11 {
+			insert(end.Add(-time.Minute), group.ID, 25)
+			total += 30
+		}
+		expected = append(expected, service.OpsTopTrafficUser{
+			UserID: user.ID, Username: user.Username, Email: user.Email, TotalTrafficBytes: total,
+		})
+	}
+
+	repo := NewOpsRepository(integrationDB)
+	filter := &service.OpsDashboardFilter{StartTime: start, EndTime: end, Platform: "openai", GroupID: &group.ID}
+	users, err := repo.GetTopTrafficUsers(ctx, filter)
+	require.NoError(t, err)
+	require.Len(t, users, 10)
+	for index, result := range users {
+		require.Equal(t, expected[len(expected)-1-index], result)
+	}
+	filter.Platform = "anthropic"
+	users, err = repo.GetTopTrafficUsers(ctx, filter)
+	require.NoError(t, err)
+	require.Empty(t, users)
+}
 
 // Real PostgreSQL evaluates the shared JSONB/SUM/FILTER expressions rather than
 // returning mock totals. No usage/error rows are created: traffic-only failures

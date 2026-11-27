@@ -198,6 +198,10 @@ export default {
         startTime: 'Start Time',
         endTime: 'End Time'
       },
+      topTrafficUsers: {
+        title: 'Top 10 users by traffic',
+        loadFailed: 'Failed to load traffic rankings'
+      },
       openaiTokenStats: {
         title: 'Token Request Stats',
         viewModeTopN: 'TopN',
@@ -795,6 +799,8 @@ export default {
         dashboardCards: 'Dashboard Cards',
         displayAlertEvents: 'Display alert events',
         displayAlertEventsHint: 'Show or hide the recent alert events card on the ops dashboard. Enabled by default.',
+        displayTopTrafficUsers: 'Display top 10 users by traffic',
+        displayTopTrafficUsersHint: 'Rank users by measured traffic in usage records for the selected time range and filters. Hidden by default.',
         displayOpenAITokenStats: 'Display token request stats',
         displayOpenAITokenStatsHint: 'Show token request stats by model across all platforms, with platform and group filters. Hidden by default.',
         autoRefreshCountdown: 'Auto refresh: {seconds}s',

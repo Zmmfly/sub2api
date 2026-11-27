@@ -32,6 +32,15 @@
           >
             {{ t(preset.labelKey) }}
           </button>
+          <button
+            v-if="allowTime"
+            type="button"
+            :aria-pressed="showCustomTime"
+            :class="['date-picker-preset', showCustomTime && 'date-picker-preset-active']"
+            @click="activePreset = 'custom'"
+          >
+            {{ t('dates.custom') }}
+          </button>
         </div>
 
         <div class="date-picker-divider"></div>
@@ -47,6 +56,10 @@
               class="date-picker-input"
               @change="onDateChange"
             />
+            <label v-if="showCustomTime" class="mt-1 flex flex-col gap-1">
+              <span class="date-picker-label">{{ t('dates.startTime') }}</span>
+              <input v-model.trim="localStartTime" type="text" maxlength="5" placeholder="HH:mm" autocomplete="off" class="date-picker-input" />
+            </label>
           </div>
           <div class="date-picker-separator">
             <Icon name="arrowRight" size="sm" class="text-gray-400" />
@@ -61,12 +74,20 @@
               class="date-picker-input"
               @change="onDateChange"
             />
+            <label v-if="showCustomTime" class="mt-1 flex flex-col gap-1">
+              <span class="date-picker-label">{{ t('dates.endTime') }}</span>
+              <input v-model.trim="localEndTime" type="text" maxlength="5" placeholder="HH:mm" autocomplete="off" class="date-picker-input" />
+            </label>
           </div>
         </div>
 
+        <p v-if="showCustomTime && !customTimestampRange" class="px-3 pb-2 text-xs text-rose-600 dark:text-rose-400" role="status">
+          {{ t('dates.invalidCustomRange') }}
+        </p>
+
         <!-- Apply button -->
         <div class="date-picker-actions">
-          <button @click="apply" class="date-picker-apply">
+          <button type="button" :disabled="showCustomTime && !customTimestampRange" @click="apply" class="date-picker-apply">
             {{ t('dates.apply') }}
           </button>
         </div>
@@ -89,12 +110,15 @@ interface DatePreset {
 interface Props {
   startDate: string
   endDate: string
+  allowTime?: boolean
+  startTime?: string
+  endTime?: string
 }
 
 interface Emits {
   (e: 'update:startDate', value: string): void
   (e: 'update:endDate', value: string): void
-  (e: 'change', range: { startDate: string; endDate: string; preset: string | null }): void
+  (e: 'change', range: { startDate: string; endDate: string; preset: string | null; startTime?: string; endTime?: string }): void
 }
 
 const props = defineProps<Props>()
@@ -106,7 +130,11 @@ const isOpen = ref(false)
 const containerRef = ref<HTMLElement | null>(null)
 const localStartDate = ref(props.startDate)
 const localEndDate = ref(props.endDate)
+const localStartTime = ref('00:00')
+const localEndTime = ref('23:59')
 const activePreset = ref<string | null>('last24Hours')
+const showCustomTime = computed(() => props.allowTime && activePreset.value === 'custom')
+const minuteMs = 60_000
 
 const today = () => formatDateToString(new Date())
 
@@ -125,6 +153,25 @@ const formatDateToString = (date: Date): string => {
   const day = String(date.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
 }
+
+const formatClock = (date: Date): string =>
+  `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+
+function parseLocalDateTime(date: string, clock: string): Date | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(clock)) return null
+  const value = new Date(`${date}T${clock}:00`)
+  if (!Number.isFinite(value.getTime()) || formatDateToString(value) !== date || formatClock(value) !== clock) return null
+  return value
+}
+
+const customTimestampRange = computed(() => {
+  if (!showCustomTime.value) return null
+  const start = parseLocalDateTime(localStartDate.value, localStartTime.value)
+  const end = parseLocalDateTime(localEndDate.value, localEndTime.value)
+  if (!start || !end || start > end) return null
+  // The selected ending minute is included. The API takes an exclusive bound.
+  return { startTime: start.toISOString(), endTime: new Date(end.getTime() + minuteMs).toISOString() }
+})
 
 const presets: DatePreset[] = [
   {
@@ -212,6 +259,11 @@ const presets: DatePreset[] = [
 ]
 
 const displayValue = computed(() => {
+  if (customTimestampRange.value) {
+    const start = `${formatDate(localStartDate.value)} ${localStartTime.value}`
+    const end = `${formatDate(localEndDate.value)} ${localEndTime.value}`
+    return `${start} - ${end}`
+  }
   if (activePreset.value) {
     const preset = presets.find((p) => p.value === activePreset.value)
     if (preset) return t(preset.labelKey)
@@ -245,6 +297,7 @@ const selectPreset = (preset: DatePreset) => {
 }
 
 const onDateChange = () => {
+  if (showCustomTime.value) return
   // Check if current dates match any preset
   activePreset.value = null
   for (const preset of presets) {
@@ -261,12 +314,14 @@ const toggle = () => {
 }
 
 const apply = () => {
+  if (showCustomTime.value && !customTimestampRange.value) return
   emit('update:startDate', localStartDate.value)
   emit('update:endDate', localEndDate.value)
   emit('change', {
     startDate: localStartDate.value,
     endDate: localEndDate.value,
-    preset: activePreset.value
+    preset: activePreset.value,
+    ...customTimestampRange.value
   })
   isOpen.value = false
 }
@@ -283,36 +338,28 @@ const handleEscape = (event: KeyboardEvent) => {
   }
 }
 
-// Restore the applied range after dismissal, including parent updates from Apply.
-watch(isOpen, (open) => {
-  if (open) return
+function restoreAppliedRange() {
   localStartDate.value = props.startDate
   localEndDate.value = props.endDate
+  localStartTime.value = props.startTime ? formatClock(new Date(props.startTime)) : '00:00'
+  localEndTime.value = props.endTime ? formatClock(new Date(Date.parse(props.endTime) - minuteMs)) : '23:59'
+  activePreset.value = props.allowTime && props.startTime && props.endTime ? 'custom' : null
   onDateChange()
+}
+
+watch(isOpen, (open) => {
+  if (!open) restoreAppliedRange()
 }, { flush: 'post' })
 
-// Sync local state with props
 watch(
-  () => props.startDate,
-  (val) => {
-    localStartDate.value = val
-    onDateChange()
-  }
-)
-
-watch(
-  () => props.endDate,
-  (val) => {
-    localEndDate.value = val
-    onDateChange()
-  }
+  () => [props.startDate, props.endDate, props.startTime, props.endTime, props.allowTime],
+  restoreAppliedRange
 )
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
   document.addEventListener('keydown', handleEscape)
-  // Initialize active preset detection
-  onDateChange()
+  restoreAppliedRange()
 })
 
 onUnmounted(() => {
@@ -422,6 +469,7 @@ onUnmounted(() => {
   @apply bg-primary-600 text-white;
   @apply hover:bg-primary-700;
   @apply transition-colors duration-150;
+  @apply disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 /* Dropdown animation */

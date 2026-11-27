@@ -4,6 +4,8 @@ import { defineComponent, ref } from 'vue'
 
 import UsageView from '../UsageView.vue'
 import UsageTable from '@/components/admin/usage/UsageTable.vue'
+import UserTokenRanking from '@/components/admin/usage/UserTokenRanking.vue'
+import DateRangePicker from '@/components/common/DateRangePicker.vue'
 
 const { list, exportList, getStats, getSnapshotV2, getById, getModelStats, listErrorLogs, routeQuery, aoaToSheet, sheetAddAoa, saveAs, xlsxWrite } = vi.hoisted(() => {
   vi.stubGlobal('localStorage', {
@@ -668,7 +670,7 @@ describe('admin UsageView errors tab filter forwarding', () => {
     vi.useRealTimers()
   })
 
-  it('forwards model/account_id/group_id to listErrorLogs on the errors tab', async () => {
+  it('shares the custom time window across queries and forwards error filters', async () => {
     const wrapper = mount(UsageView, {
       global: { stubs: {
         AppLayout: AppLayoutStub, UsageStatsCards: true, UsageFilters: UsageFiltersStub,
@@ -687,7 +689,18 @@ describe('admin UsageView errors tab filter forwarding', () => {
     vm.filters.model = 'gpt-5.3-codex'
     vm.filters.account_id = 7
     vm.filters.group_id = 3
+    const start_time = '2026-07-01T08:15:00.000Z'
+    const end_time = '2026-07-01T08:31:00.000Z'
+    wrapper.getComponent(DateRangePicker).vm.$emit('change', {
+      preset: 'custom', startDate: '2026-07-01', endDate: '2026-07-01', startTime: start_time, endTime: end_time,
+    })
     await flushPromises()
+
+    const timeWindow = expect.objectContaining({ start_time, end_time })
+    expect(list).toHaveBeenLastCalledWith(timeWindow, expect.anything())
+    expect(getStats).toHaveBeenLastCalledWith(timeWindow)
+    expect(getSnapshotV2).toHaveBeenLastCalledWith(timeWindow)
+    expect(getModelStats).toHaveBeenLastCalledWith(timeWindow)
 
     // 切换到「错误请求」标签（第二个 tab 按钮）触发 loadAdminErrors
     const tabs = wrapper.findAll('[data-testid="usage-detail-tab"]')
@@ -699,7 +712,13 @@ describe('admin UsageView errors tab filter forwarding', () => {
       model: 'gpt-5.3-codex',
       account_id: 7,
       group_id: 3,
+      start_time,
+      end_time,
     }))
+
+    await tabs[2].trigger('click')
+    expect(wrapper.getComponent(UserTokenRanking).props('filters')).toEqual(timeWindow)
+    wrapper.unmount()
   })
 })
 

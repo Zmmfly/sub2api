@@ -73,6 +73,13 @@ export interface OpsTrafficSummary {
   ingestion?: OpsTrafficIngestionHealth | null
 }
 
+export interface OpsTopTrafficUser {
+  user_id: number
+  username: string
+  email: string
+  total_traffic_bytes: number
+}
+
 export interface OpsDashboardOverview {
   start_time: string
   end_time: string
@@ -854,6 +861,7 @@ export interface OpsAdvancedSettings {
   ignore_no_available_accounts: boolean
   ignore_invalid_api_key_errors: boolean
   ignore_insufficient_balance_errors: boolean
+  display_top_traffic_users: boolean
   display_openai_token_stats: boolean
   display_alert_events: boolean
   auto_refresh_enabled: boolean
@@ -1034,6 +1042,17 @@ export async function getDashboardOverview(
   options: OpsRequestOptions = {}
 ): Promise<OpsDashboardOverview> {
   const { data } = await apiClient.get<OpsDashboardOverview>('/admin/ops/dashboard/overview', {
+    params,
+    signal: options.signal
+  })
+  return data
+}
+
+export async function getTopTrafficUsers(
+  params: Pick<OpsDashboardOverview, 'start_time' | 'end_time' | 'platform' | 'group_id'>,
+  options: OpsRequestOptions = {}
+): Promise<OpsTopTrafficUser[]> {
+  const { data } = await apiClient.get<OpsTopTrafficUser[]>('/admin/ops/dashboard/top-traffic-users', {
     params,
     signal: options.signal
   })
@@ -1374,6 +1393,7 @@ export const opsAPI = {
   getLatencyHistogram,
   getErrorTrend,
   getErrorDistribution,
+  getTopTrafficUsers,
   getOpenAITokenStats,
   getConcurrencyStats,
   getUserConcurrencyStats,

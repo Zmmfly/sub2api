@@ -13,6 +13,7 @@ const messages: Record<string, string> = {
   'dates.last30Days': 'Last 30 Days',
   'dates.thisMonth': 'This Month',
   'dates.lastMonth': 'Last Month',
+  'dates.custom': 'Custom',
   'dates.startDate': 'Start Date',
   'dates.endDate': 'End Date',
   'dates.apply': 'Apply',
@@ -92,5 +93,39 @@ describe('DateRangePicker', () => {
         preset: 'last24Hours'
       }
     ])
+  })
+
+  it('validates 24-hour times and includes the entire ending minute in a custom range', async () => {
+    const date = '2026-07-01'
+    const wrapper = mount(DateRangePicker, {
+      props: { startDate: date, endDate: date, allowTime: true },
+      global: { stubs: { Icon: true } },
+    })
+    await wrapper.get('.date-picker-trigger').trigger('click')
+    const custom = wrapper.findAll('.date-picker-preset').find(button => button.text() === 'Custom')
+    await custom!.trigger('click')
+    const [start, end] = wrapper.findAll('input[placeholder="HH:mm"]')
+    await start.setValue('18:45')
+    await end.setValue('18:30')
+    expect(wrapper.get('.date-picker-apply').attributes()).toHaveProperty('disabled')
+    await end.setValue('24:00')
+    expect(wrapper.get('.date-picker-apply').attributes()).toHaveProperty('disabled')
+    await end.setValue('19:05')
+    await wrapper.get('.date-picker-apply').trigger('click')
+
+    const startTime = new Date(`${date}T18:45:00`).toISOString()
+    const endTime = new Date(`${date}T19:06:00`).toISOString()
+    expect(wrapper.emitted('change')?.[0]).toEqual([{
+      startDate: date, endDate: date, preset: 'custom', startTime, endTime,
+    }])
+    await wrapper.setProps({ startTime, endTime })
+    expect(wrapper.get('.date-picker-trigger').text()).toContain('19:05')
+    await wrapper.get('.date-picker-trigger').trigger('click')
+    const today = wrapper.findAll('.date-picker-preset').find(button => button.text() === 'Today')
+    await today!.trigger('click')
+    expect(wrapper.findAll('input[placeholder="HH:mm"]')).toHaveLength(0)
+    await wrapper.get('.date-picker-apply').trigger('click')
+    expect(wrapper.emitted('change')?.[1]?.[0]).not.toHaveProperty('startTime')
+    wrapper.unmount()
   })
 })

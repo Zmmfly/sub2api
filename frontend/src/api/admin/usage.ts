@@ -69,6 +69,8 @@ export interface UsageCleanupTask {
 export interface CreateUsageCleanupTaskRequest {
   start_date: string
   end_date: string
+  start_time?: string
+  end_time?: string
   user_id?: number
   api_key_id?: number
   account_id?: number
@@ -82,6 +84,8 @@ export interface CreateUsageCleanupTaskRequest {
 
 export interface AdminUsageQueryParams extends UsageQueryParams {
   user_id?: number
+  start_time?: string
+  end_time?: string
   exact_total?: boolean
   billing_mode?: string
   upstream_model_mismatch?: boolean
@@ -129,6 +133,8 @@ export async function getStats(params: {
   period?: string
   start_date?: string
   end_date?: string
+  start_time?: string
+  end_time?: string
   timezone?: string
   nocache?: number
 }): Promise<AdminUsageStatsResponse> {

@@ -10,6 +10,38 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
+func (r *opsRepository) GetTopTrafficUsers(ctx context.Context, filter *service.OpsDashboardFilter) ([]service.OpsTopTrafficUser, error) {
+	join, where, args, _ := buildUsageWhere(filter, filter.StartTime.UTC(), filter.EndTime.UTC(), 1)
+	query := `
+		WITH ranked AS (
+			SELECT ul.user_id, SUM(usage_log_total_traffic_bytes(ul.traffic))::bigint AS total_traffic_bytes
+			FROM usage_logs ul ` + join + ` ` + where + ` AND ul.traffic IS NOT NULL
+			GROUP BY ul.user_id
+			HAVING SUM(usage_log_total_traffic_bytes(ul.traffic)) IS NOT NULL
+			ORDER BY total_traffic_bytes DESC, ul.user_id
+			LIMIT 10
+		)
+		SELECT ranked.user_id, COALESCE(u.username, ''), COALESCE(u.email, ''), ranked.total_traffic_bytes
+		FROM ranked
+		LEFT JOIN users u ON u.id = ranked.user_id
+		ORDER BY ranked.total_traffic_bytes DESC, ranked.user_id`
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	users := make([]service.OpsTopTrafficUser, 0, 10)
+	for rows.Next() {
+		var user service.OpsTopTrafficUser
+		if err := rows.Scan(&user.UserID, &user.Username, &user.Email, &user.TotalTrafficBytes); err != nil {
+			return nil, err
+		}
+		users = append(users, user)
+	}
+	return users, rows.Err()
+}
+
 // Stored in ops_metrics_hourly.traffic. These are additive sufficient statistics,
 // not averages of per-request ratios. A NULL column means the bucket predates
 // traffic aggregation and must not be mistaken for an observed empty bucket.

@@ -38,7 +38,7 @@ func TestUserUsageTrafficListAndDetailRedaction(t *testing.T) {
 				}
 				record := service.UsageLog{ID: 7, UserID: 42, Traffic: value}
 				repo := &userTrafficRepo{record: &record, userUsageRepoCapture: userUsageRepoCapture{listRows: []service.UsageLog{record}}}
-				h := NewUsageHandler(service.NewUsageService(repo, nil, nil, nil), nil, nil, nil)
+				h := NewUsageHandler(service.NewUsageService(repo, nil, nil, nil), nil, nil, nil, nil)
 				gin.SetMode(gin.TestMode)
 				router := gin.New()
 				router.Use(func(c *gin.Context) {

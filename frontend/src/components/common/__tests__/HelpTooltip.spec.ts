@@ -1,7 +1,9 @@
-import { afterEach, describe, expect, it } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
+
+enableAutoUnmount(afterEach)
 
 function getTooltipElement(): HTMLDivElement {
   const tooltip = document.body.querySelector('[role="tooltip"]')
@@ -51,6 +53,8 @@ function mockTooltipSize(tooltip: HTMLElement, width: number, height: number) {
 
 describe('HelpTooltip', () => {
   afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
     document.body.innerHTML = ''
     setViewport(initialViewport.width, initialViewport.height)
     Object.defineProperty(window, 'scrollX', { configurable: true, value: initialViewport.scrollX })
@@ -77,8 +81,6 @@ describe('HelpTooltip', () => {
     await trigger.trigger('mouseleave')
     await nextTick()
     expect(tooltip.style.display).toBe('none')
-
-    wrapper.unmount()
   })
 
   it('opens on keyboard focus, describes the trigger and stays open on mouse leave until focus leaves', async () => {
@@ -105,7 +107,6 @@ describe('HelpTooltip', () => {
     await nextTick()
     expect(tooltip.style.display).toBe('none')
     expect(trigger.attributes('aria-describedby')).toBeUndefined()
-    wrapper.unmount()
   })
 
   it('keeps hovered details open when focus leaves and supports Escape dismissal', async () => {
@@ -132,7 +133,6 @@ describe('HelpTooltip', () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     await nextTick()
     expect(tooltip.style.display).toBe('none')
-    wrapper.unmount()
   })
 
   it('does not change click-only tooltips into focus or hover tooltips', async () => {
@@ -154,7 +154,6 @@ describe('HelpTooltip', () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     await nextTick()
     expect(tooltip.style.display).toBe('none')
-    wrapper.unmount()
   })
 
   it('keeps a hover tooltip open while the pointer moves between the trigger and the tooltip', async () => {
@@ -183,8 +182,6 @@ describe('HelpTooltip', () => {
     tooltip.dispatchEvent(new MouseEvent('mouseleave', { relatedTarget: null }))
     await nextTick()
     expect(tooltip.style.display).toBe('none')
-
-    wrapper.unmount()
   })
 
   it('keeps the hover bridge and arrow outside the scrollable content', async () => {
@@ -203,7 +200,6 @@ describe('HelpTooltip', () => {
     const arrow = tooltip.querySelector('.-bottom-1')
     expect(arrow?.parentElement).toBe(tooltip)
     expect(arrow?.parentElement).not.toBe(content)
-    wrapper.unmount()
   })
 
   it('uses viewport coordinates after scrolling and clamps the tooltip horizontally', async () => {
@@ -223,7 +219,6 @@ describe('HelpTooltip', () => {
     expect(tooltip.style.left).toBe('168px')
     expect(getTooltipContentElement(tooltip).style.maxHeight).toBe(`${284 - TOOLTIP_CHROME_HEIGHT}px`)
     expect(tooltip.classList.contains('-translate-y-full')).toBe(true)
-    wrapper.unmount()
   })
 
   it('flips below the trigger when the tooltip does not fit above', async () => {
@@ -242,7 +237,6 @@ describe('HelpTooltip', () => {
     expect(getTooltipContentElement(tooltip).style.maxHeight).toBe(`${464 - TOOLTIP_CHROME_HEIGHT}px`)
     expect(tooltip.classList.contains('-translate-y-full')).toBe(false)
     expect(tooltip.querySelector('.-top-1')).not.toBeNull()
-    wrapper.unmount()
   })
 
   it('limits readable height to the larger available side when neither side fits', async () => {
@@ -261,7 +255,6 @@ describe('HelpTooltip', () => {
     expect(tooltip.classList.contains('overflow-y-auto')).toBe(false)
     expect(getTooltipContentElement(tooltip).classList.contains('overflow-y-auto')).toBe(true)
     expect(tooltip.classList.contains('-translate-y-full')).toBe(true)
-    wrapper.unmount()
   })
 
   it('supports click-to-toggle details and closes on outside click', async () => {
@@ -298,7 +291,67 @@ describe('HelpTooltip', () => {
     document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await nextTick()
     expect(tooltip.style.display).toBe('none')
-
-    wrapper.unmount()
   })
+
+  it.each([
+    { scrollX: 120, scrollY: 0 },
+    { scrollX: 0, scrollY: 240 },
+    { scrollX: 120, scrollY: 240 },
+  ])('uses viewport coordinates when opening with scroll ($scrollX, $scrollY)', async ({ scrollX, scrollY }) => {
+    vi.stubGlobal('scrollX', scrollX)
+    vi.stubGlobal('scrollY', scrollY)
+    const wrapper = mount(HelpTooltip, {
+      attachTo: document.body,
+      props: { content: 'positioned details' },
+    })
+    const trigger = wrapper.get('.group')
+    vi.spyOn(trigger.element, 'getBoundingClientRect').mockReturnValue(new DOMRect(80, 160, 24, 24))
+
+    await trigger.trigger('mouseenter')
+    await nextTick()
+
+    const tooltip = getTooltipElement()
+    expect(tooltip.style.display).not.toBe('none')
+    expect(tooltip.classList.contains('fixed')).toBe(true)
+    expect(tooltip.style.left).toBe('92px')
+    expect(tooltip.style.top).toBe('152px')
+  })
+
+  it.each(['window scroll', 'nested scroll', 'resize'] as const)(
+    'recalculates viewport coordinates for an open tooltip on %s',
+    async (change) => {
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const wrapper = mount(HelpTooltip, {
+        attachTo: container,
+        props: { content: 'moving details', trigger: 'click' },
+      })
+      const trigger = wrapper.get('.group')
+      const getBoundingClientRect = vi.spyOn(trigger.element, 'getBoundingClientRect')
+        .mockReturnValue(new DOMRect(80, 160, 24, 24))
+
+      await trigger.trigger('click')
+      await nextTick()
+
+      const tooltip = getTooltipElement()
+      expect(tooltip.style.left).toBe('92px')
+      expect(tooltip.style.top).toBe('152px')
+
+      vi.stubGlobal('scrollX', 120)
+      vi.stubGlobal('scrollY', 240)
+      getBoundingClientRect.mockReturnValue(new DOMRect(40, 100, 32, 24))
+
+      if (change === 'nested scroll') {
+        container.dispatchEvent(new Event('scroll', { bubbles: false }))
+      } else {
+        window.dispatchEvent(new Event(change === 'resize' ? 'resize' : 'scroll'))
+      }
+      await nextTick()
+
+      expect(tooltip.style.display).not.toBe('none')
+      expect(getBoundingClientRect).toHaveBeenCalledTimes(2)
+      expect(tooltip.style.left).toBe('56px')
+      expect(tooltip.style.top).toBe('92px')
+    },
+  )
 })

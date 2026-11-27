@@ -59,6 +59,7 @@ func TestGetUserBreakdown_GroupIDFilter(t *testing.T) {
 	require.Equal(t, int64(42), repo.capturedDim.GroupID)
 	require.Empty(t, repo.capturedDim.Model)
 	require.Empty(t, repo.capturedDim.Endpoint)
+	require.False(t, repo.capturedDim.IncludeTraffic)
 	require.Equal(t, 50, repo.capturedLimit)  // default limit
 	require.Empty(t, repo.capturedDim.SortBy) // no sort_by => empty (repo falls back to default)
 }
@@ -171,20 +172,22 @@ func TestGetUserBreakdown_LimitClamped(t *testing.T) {
 }
 
 func TestGetUserBreakdown_ResponseFormat(t *testing.T) {
+	totalBytes := int64(2 << 20)
 	repo := &userBreakdownRepoCapture{
 		result: []usagestats.UserBreakdownItem{
-			{UserID: 1, Email: "alice@test.com", Requests: 100, TotalTokens: 50000, Cost: 1.5, ActualCost: 1.2},
+			{UserID: 1, Email: "alice@test.com", Requests: 100, TotalTokens: 50000, Cost: 1.5, ActualCost: 1.2, TotalTrafficBytes: &totalBytes},
 			{UserID: 2, Email: "bob@test.com", Requests: 50, TotalTokens: 25000, Cost: 0.8, ActualCost: 0.6},
 		},
 	}
 	router := newUserBreakdownRouter(repo)
 
 	req := httptest.NewRequest(http.MethodGet,
-		"/admin/dashboard/user-breakdown?start_date=2026-03-01&end_date=2026-03-16&group_id=1", nil)
+		"/admin/dashboard/user-breakdown?start_date=2026-03-01&end_date=2026-03-16&group_id=1&include_traffic=true", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
+	require.True(t, repo.capturedDim.IncludeTraffic)
 
 	var resp struct {
 		Code int `json:"code"`
@@ -202,6 +205,8 @@ func TestGetUserBreakdown_ResponseFormat(t *testing.T) {
 	require.Equal(t, "alice@test.com", resp.Data.Users[0].Email)
 	require.Equal(t, int64(100), resp.Data.Users[0].Requests)
 	require.InDelta(t, 1.2, resp.Data.Users[0].ActualCost, 0.001)
+	require.Equal(t, &totalBytes, resp.Data.Users[0].TotalTrafficBytes)
+	require.Nil(t, resp.Data.Users[1].TotalTrafficBytes)
 	require.Equal(t, "2026-03-01", resp.Data.StartDate)
 	require.Equal(t, "2026-03-16", resp.Data.EndDate)
 }

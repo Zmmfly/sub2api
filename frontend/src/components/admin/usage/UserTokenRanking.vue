@@ -72,6 +72,7 @@
             <td class="whitespace-nowrap px-4 py-3 text-right text-sm tabular-nums text-gray-500 dark:text-gray-400">{{ fmtTokens(item.cache_tokens) }}</td>
             <td class="whitespace-nowrap px-4 py-3 text-right text-sm font-medium tabular-nums text-gray-900 dark:text-gray-100">{{ fmtTokens(item.total_tokens) }}</td>
             <td class="whitespace-nowrap px-4 py-3 text-right text-sm font-medium tabular-nums text-green-600 dark:text-green-400">${{ fmtCost(item.actual_cost) }}</td>
+            <td class="whitespace-nowrap px-4 py-3 text-right text-sm tabular-nums text-gray-500 dark:text-gray-400">{{ formatTrafficBytes(item.total_traffic_bytes) }}</td>
           </tr>
         </tbody>
       </table>
@@ -80,20 +81,22 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { getUserBreakdown, type UserBreakdownParams } from '@/api/admin/dashboard'
 import { formatCompactNumber, formatCostFixed } from '@/utils/format'
+import { formatTrafficBytes } from '@/utils/traffic'
 import type { UserBreakdownItem } from '@/types'
 import Select from '@/components/common/Select.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
+  active?: boolean
   startDate: string
   endDate: string
   filters: Record<string, unknown>
   model?: string
-}>()
+}>(), { active: true })
 
 defineEmits<{ (e: 'select-user', userId: number, email: string): void }>()
 
@@ -107,6 +110,7 @@ const sortableColumns: { key: SortKey; label: string }[] = [
   { key: 'cache_tokens', label: 'admin.usage.tokenRanking.columns.cacheTokens' },
   { key: 'total_tokens', label: 'admin.usage.tokenRanking.columns.totalTokens' },
   { key: 'actual_cost', label: 'admin.usage.tokenRanking.columns.cost' },
+  { key: 'total_traffic_bytes', label: 'usage.traffic.title' },
 ]
 
 const limitOptions = [
@@ -127,7 +131,7 @@ const items = ref<UserBreakdownItem[]>([])
 const loading = ref(false)
 const sortBy = ref<SortKey>('total_tokens')
 const limit = ref(50)
-let reqSeq = 0
+let requestController: AbortController | undefined
 
 const fmtTokens = (v: number) => formatCompactNumber(v)
 const fmtCost = (v: number) => formatCostFixed(v, 4)
@@ -139,7 +143,10 @@ const setSort = (key: SortKey) => {
 }
 
 const load = async () => {
-  const seq = ++reqSeq
+  if (!props.active) return
+  requestController?.abort()
+  const controller = new AbortController()
+  requestController = controller
   loading.value = true
   try {
     const params: UserBreakdownParams = {
@@ -147,26 +154,31 @@ const load = async () => {
       start_date: props.startDate,
       end_date: props.endDate,
       sort_by: sortBy.value,
+      include_traffic: true,
       limit: limit.value,
     }
     if (props.model) params.model = props.model
-    const res = await getUserBreakdown(params)
-    if (seq !== reqSeq) return
-    items.value = res.users || []
+    const res = await getUserBreakdown(params, { signal: controller.signal })
+    if (!controller.signal.aborted) items.value = res.users || []
   } catch {
-    if (seq !== reqSeq) return
-    items.value = []
+    if (!controller.signal.aborted) items.value = []
   } finally {
-    if (seq === reqSeq) loading.value = false
+    if (requestController === controller) {
+      requestController = undefined
+      loading.value = false
+    }
   }
 }
 
-// Reload when the shared filters / date range / model change.
 watch(
-  () => [props.startDate, props.endDate, props.model, JSON.stringify(props.filters)],
-  () => load(),
+  () => props.active ? [props.startDate, props.endDate, props.model, JSON.stringify(props.filters)] : null,
+  (query) => {
+    if (query) void load()
+    else requestController?.abort()
+  },
   { immediate: true }
 )
+onBeforeUnmount(() => requestController?.abort())
 
 defineExpose({ reload: load })
 </script>

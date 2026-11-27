@@ -14,6 +14,7 @@ import (
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/traffic"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
@@ -686,6 +687,90 @@ func (s *UsageLogRepoSuite) TestListWithFilters() {
 	s.Require().NoError(err, "ListWithFilters")
 	s.Require().Len(logs, 1)
 	s.Require().Equal(int64(1), page.Total)
+}
+
+func (s *UsageLogRepoSuite) TestTrafficSortAndUserBreakdown() {
+	newKey := func(name string) *service.APIKey {
+		user := mustCreateUser(s.T(), s.client, &service.User{Email: name + "@test.com"})
+		return mustCreateApiKey(s.T(), s.client, &service.APIKey{UserID: user.ID, Key: "sk-" + name, Name: name})
+	}
+	secondUser := newKey("traffic-second")
+	firstUser := newKey("traffic-first")
+	legacyUser := newKey("traffic-legacy")
+	account := mustCreateAccount(s.T(), s.client, &service.Account{Name: "acc-traffic-sort"})
+	start := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	addLog := func(key *service.APIKey, at time.Time, observation *traffic.Usage) int64 {
+		log := &service.UsageLog{
+			UserID: key.UserID, APIKeyID: key.ID, AccountID: account.ID,
+			RequestID: uuid.New().String(), Model: "traffic-sort", CreatedAt: at, Traffic: observation,
+		}
+		_, err := s.repo.Create(s.ctx, log)
+		s.Require().NoError(err)
+		return log.ID
+	}
+	measurement := func(actual int64) *traffic.Measurement { return &traffic.Measurement{ActualBytes: &actual} }
+	response := func(actual int64) *traffic.Usage {
+		return &traffic.Usage{Downstream: &traffic.Link{Response: measurement(actual)}}
+	}
+	original := int64(8192)
+	request := measurement(10)
+	request.OriginalBytes = &original
+	request.Compressed = true
+	first := addLog(firstUser, start, &traffic.Usage{
+		Upstream:   &traffic.Link{Request: request, Response: measurement(20)},
+		Downstream: &traffic.Link{Request: measurement(30), Response: measurement(40)},
+	})
+	second := addLog(secondUser, start, response(80))
+	tieFirst := addLog(firstUser, start, response(40))
+	tieSecond := addLog(secondUser, start, response(40))
+	legacy := addLog(legacyUser, start, nil)
+	addLog(firstUser, end, response(2048))
+
+	filters := usagestats.UsageLogFilters{StartTime: &start, EndTime: &end, Model: "traffic-sort"}
+	for _, tc := range []struct {
+		order string
+		page  int
+		exact bool
+		ids   []int64
+	}{
+		{pagination.SortOrderDesc, 1, false, []int64{first, second}},
+		{pagination.SortOrderDesc, 2, false, []int64{tieSecond, tieFirst}},
+		{pagination.SortOrderAsc, 1, true, []int64{legacy, tieFirst}},
+		{pagination.SortOrderAsc, 2, false, []int64{tieSecond, second}},
+	} {
+		filters.ExactTotal = tc.exact
+		logs, page, err := s.repo.ListWithFilters(s.ctx, pagination.PaginationParams{
+			Page: tc.page, PageSize: 2, SortBy: "traffic", SortOrder: tc.order,
+		}, filters)
+		s.Require().NoError(err)
+		s.Require().Len(logs, 2)
+		s.Equal(tc.ids, []int64{logs[0].ID, logs[1].ID})
+		if tc.exact {
+			s.EqualValues(5, page.Total)
+		}
+	}
+
+	ranked, err := s.repo.GetUserBreakdownStats(s.ctx, start, end, usagestats.UserBreakdownDimension{
+		Model: "traffic-sort", SortBy: "total_traffic_bytes",
+	}, 3)
+	s.Require().NoError(err)
+	s.Require().Len(ranked, 3)
+	s.Equal(firstUser.UserID, ranked[0].UserID)
+	s.Equal("traffic-first@test.com", ranked[0].Email)
+	firstTotal, secondTotal := int64(140), int64(120)
+	s.Equal(&firstTotal, ranked[0].TotalTrafficBytes)
+	s.Equal(secondUser.UserID, ranked[1].UserID)
+	s.Equal(&secondTotal, ranked[1].TotalTrafficBytes)
+	s.Equal(legacyUser.UserID, ranked[2].UserID)
+	s.Nil(ranked[2].TotalTrafficBytes)
+
+	byTokens, err := s.repo.GetUserBreakdownStats(s.ctx, start, end, usagestats.UserBreakdownDimension{
+		UserID: firstUser.UserID, SortBy: "total_tokens", IncludeTraffic: true,
+	}, 1)
+	s.Require().NoError(err)
+	s.Require().Len(byTokens, 1)
+	s.Equal(&firstTotal, byTokens[0].TotalTrafficBytes)
 }
 
 // --- GetDashboardStats ---

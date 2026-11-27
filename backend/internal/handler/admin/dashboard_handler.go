@@ -670,7 +670,7 @@ func (h *DashboardHandler) GetBatchAPIKeysUsage(c *gin.Context) {
 
 // GetUserBreakdown handles getting per-user usage breakdown within a dimension.
 // GET /api/v1/admin/dashboard/user-breakdown
-// Query params: start_date, end_date, group_id, model, endpoint, endpoint_type, limit
+// Query params include start_date, end_date, group_id, model, endpoint, endpoint_type, limit, and include_traffic.
 func (h *DashboardHandler) GetUserBreakdown(c *gin.Context) {
 	startTime, endTime := parseTimeRange(c)
 
@@ -737,6 +737,7 @@ func (h *DashboardHandler) GetUserBreakdown(c *gin.Context) {
 
 	// sort_by 由 repo 层 allowlist 校验;非法值静默回退默认排序(actual_cost)。
 	dim.SortBy = strings.TrimSpace(c.Query("sort_by"))
+	dim.IncludeTraffic, _ = strconv.ParseBool(c.Query("include_traffic"))
 
 	limit := 50
 	if v := c.Query("limit"); v != "" {

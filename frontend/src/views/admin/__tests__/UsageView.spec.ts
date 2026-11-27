@@ -480,13 +480,24 @@ describe('admin UsageView request ID column visibility', () => {
     vi.useRealTimers()
   })
 
-  it('shows the unsortable traffic column by default between cost and latency', async () => {
+  it('shows the sortable traffic column between cost and latency and forwards both sort directions', async () => {
     const wrapper = mountRouteFilteredUsageView()
     await wrapper.vm.$nextTick()
-    const columns = wrapper.findComponent(UsageTable).props('columns')
+    const table = wrapper.findComponent(UsageTable)
+    const columns = table.props('columns')
     const keys = columns.map((column: { key: string }) => column.key)
-    expect(columns).toContainEqual({ key: 'traffic', label: 'usage.traffic.title', sortable: false })
+    expect(columns).toContainEqual({ key: 'traffic', label: 'usage.traffic.title', sortable: true })
     expect(keys.slice(keys.indexOf('cost'), keys.indexOf('cost') + 3)).toEqual(['cost', 'traffic', 'latency'])
+    expect(table.props('serverSideSort')).toBe(true)
+
+    for (const order of ['asc', 'desc'] as const) {
+      table.vm.$emit('sort', 'traffic', order)
+      expect(list).toHaveBeenLastCalledWith(expect.objectContaining({
+        page: 1,
+        sort_by: 'traffic',
+        sort_order: order,
+      }), expect.anything())
+    }
     wrapper.unmount()
   })
 

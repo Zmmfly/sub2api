@@ -65,8 +65,8 @@ func TestGetUserBreakdownStatsRequestTypeIncludesLegacyFallback(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(legacyFilter)).
 		WithArgs(start, end, requestType).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"user_id", "email", "requests", "input_tokens", "output_tokens",
-			"cache_tokens", "total_tokens", "cost", "actual_cost", "account_cost",
+			"user_id", "requests", "input_tokens", "output_tokens", "cache_tokens",
+			"total_tokens", "cost", "actual_cost", "account_cost", "total_traffic_bytes", "email",
 		}))
 
 	rows, err := repo.GetUserBreakdownStats(context.Background(), start, end, usagestats.UserBreakdownDimension{
@@ -88,8 +88,8 @@ func TestGetUserBreakdownStatsFiltersNativeCompactionV2(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("AND ul.native_compaction_v2 = $3")).
 		WithArgs(start, end, true).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"user_id", "email", "requests", "input_tokens", "output_tokens",
-			"cache_tokens", "total_tokens", "cost", "actual_cost", "account_cost",
+			"user_id", "requests", "input_tokens", "output_tokens", "cache_tokens",
+			"total_tokens", "cost", "actual_cost", "account_cost", "total_traffic_bytes", "email",
 		}))
 
 	rows, err := repo.GetUserBreakdownStats(context.Background(), start, end, usagestats.UserBreakdownDimension{

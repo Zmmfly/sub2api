@@ -151,10 +151,11 @@
             @update:pageSize="onErrPageSize"
             @ipGeoBatchFailed="handleIpGeoBatchFailed" />
         </div>
-        <!-- 懒挂载：首次切到该 tab 才请求排行数据，之后随筛选自动刷新 -->
+        <!-- 懒挂载并保留排序设置，只在用户排行可见时加载数据 -->
         <div v-if="rankingMounted" v-show="activeTab === 'ranking'" class="overflow-hidden rounded-b-2xl">
           <UserTokenRanking
             ref="rankingRef"
+            :active="activeTab === 'ranking'"
             :start-date="startDate"
             :end-date="endDate"
             :filters="breakdownFilters"
@@ -538,7 +539,7 @@ const refreshData = () => {
   loadModelStats(modelDistributionSource.value, true)
   loadChartData()
   if (activeTab.value === 'errors') loadAdminErrors()
-  if (rankingMounted.value) rankingRef.value?.reload()
+  if (activeTab.value === 'ranking') rankingRef.value?.reload()
 }
 const resetFilters = () => {
   const range = getLast24HoursRangeDates()
@@ -649,7 +650,7 @@ const allColumns = computed(() => [
   { key: 'billing_mode', label: t('admin.usage.billingMode'), sortable: false },
   { key: 'tokens', label: t('usage.tokens'), sortable: false },
   { key: 'cost', label: t('usage.cost'), sortable: false },
-  { key: 'traffic', label: t('usage.traffic.title'), sortable: false },
+  { key: 'traffic', label: t('usage.traffic.title'), sortable: true },
   { key: 'latency', label: t('usage.latency'), sortable: false },
   { key: 'created_at', label: t('usage.time'), sortable: true },
   { key: 'request_id', label: t('admin.usage.requestId'), sortable: false },

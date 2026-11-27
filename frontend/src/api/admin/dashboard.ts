@@ -174,7 +174,8 @@ export interface UserBreakdownParams {
   endpoint_type?: 'inbound' | 'upstream' | 'path'
   limit?: number
   // Sort column for the ranking (allowlisted server-side; falls back to actual_cost)
-  sort_by?: 'total_tokens' | 'input_tokens' | 'output_tokens' | 'cache_tokens' | 'requests' | 'cost' | 'actual_cost'
+  sort_by?: 'total_tokens' | 'input_tokens' | 'output_tokens' | 'cache_tokens' | 'requests' | 'cost' | 'actual_cost' | 'total_traffic_bytes'
+  include_traffic?: boolean
   // Additional filter conditions
   user_id?: number
   api_key_id?: number
@@ -191,9 +192,13 @@ export interface UserBreakdownResponse {
   end_date: string
 }
 
-export async function getUserBreakdown(params: UserBreakdownParams): Promise<UserBreakdownResponse> {
+export async function getUserBreakdown(
+  params: UserBreakdownParams,
+  options?: { signal?: AbortSignal }
+): Promise<UserBreakdownResponse> {
   const { data } = await apiClient.get<UserBreakdownResponse>('/admin/dashboard/user-breakdown', {
-    params
+    params,
+    signal: options?.signal
   })
   return data
 }

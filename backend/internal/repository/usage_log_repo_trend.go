@@ -613,10 +613,15 @@ func (r *usageLogRepository) getGroupStatsWithFilters(ctx context.Context, start
 
 // GetUserBreakdownStats returns per-user usage breakdown within a specific dimension.
 func (r *usageLogRepository) GetUserBreakdownStats(ctx context.Context, startTime, endTime time.Time, dim usagestats.UserBreakdownDimension, limit int) (results []usagestats.UserBreakdownItem, err error) {
+	trafficTotal := "NULL::bigint"
+	if dim.IncludeTraffic || dim.SortBy == "total_traffic_bytes" {
+		trafficTotal = "SUM(usage_log_total_traffic_bytes(ul.traffic))::bigint"
+	}
+
 	query := `
+		WITH ranked AS (
 		SELECT
 			COALESCE(ul.user_id, 0) as user_id,
-			COALESCE(u.email, '') as email,
 			COUNT(*) as requests,
 			COALESCE(SUM(ul.input_tokens), 0) as input_tokens,
 			COALESCE(SUM(ul.output_tokens), 0) as output_tokens,
@@ -624,9 +629,9 @@ func (r *usageLogRepository) GetUserBreakdownStats(ctx context.Context, startTim
 			COALESCE(SUM(ul.input_tokens + ul.output_tokens + ul.cache_creation_tokens + ul.cache_read_tokens), 0) as total_tokens,
 			COALESCE(SUM(ul.total_cost), 0) as cost,
 			COALESCE(SUM(ul.actual_cost), 0) as actual_cost,
-			COALESCE(SUM(COALESCE(ul.account_stats_cost, ul.total_cost) * COALESCE(ul.account_rate_multiplier, 1)), 0) as account_cost
+			COALESCE(SUM(COALESCE(ul.account_stats_cost, ul.total_cost) * COALESCE(ul.account_rate_multiplier, 1)), 0) as account_cost,
+			` + trafficTotal + ` as total_traffic_bytes
 		FROM usage_logs ul
-		LEFT JOIN users u ON u.id = ul.user_id
 		WHERE ul.created_at >= $1 AND ul.created_at < $2
 	`
 	args := []any{startTime, endTime}
@@ -674,13 +679,20 @@ func (r *usageLogRepository) GetUserBreakdownStats(ctx context.Context, startTim
 	// ORDER BY 列来自固定 allowlist(非用户原样字符串),避免 SQL 注入。
 	orderBy := "actual_cost"
 	switch dim.SortBy {
-	case "total_tokens", "input_tokens", "output_tokens", "cache_tokens", "requests", "cost", "actual_cost":
+	case "total_tokens", "input_tokens", "output_tokens", "cache_tokens", "requests", "cost", "actual_cost", "total_traffic_bytes":
 		orderBy = dim.SortBy
 	}
-	query += " GROUP BY ul.user_id, u.email ORDER BY " + orderBy + " DESC"
+	query += " GROUP BY ul.user_id ORDER BY " + orderBy + " DESC NULLS LAST, user_id"
 	if limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
+	query += `
+		)
+		SELECT ranked.*, COALESCE(u.email, '') AS email
+		FROM ranked
+		LEFT JOIN users u ON u.id = ranked.user_id
+		ORDER BY ranked.` + orderBy + ` DESC NULLS LAST, ranked.user_id
+	`
 
 	rows, err := r.sql.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -698,7 +710,6 @@ func (r *usageLogRepository) GetUserBreakdownStats(ctx context.Context, startTim
 		var row usagestats.UserBreakdownItem
 		if err := rows.Scan(
 			&row.UserID,
-			&row.Email,
 			&row.Requests,
 			&row.InputTokens,
 			&row.OutputTokens,
@@ -707,6 +718,8 @@ func (r *usageLogRepository) GetUserBreakdownStats(ctx context.Context, startTim
 			&row.Cost,
 			&row.ActualCost,
 			&row.AccountCost,
+			&row.TotalTrafficBytes,
+			&row.Email,
 		); err != nil {
 			return nil, err
 		}

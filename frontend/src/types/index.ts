@@ -2159,6 +2159,7 @@ export interface UserBreakdownItem {
   cost: number
   actual_cost: number
   account_cost: number
+  total_traffic_bytes?: number
 }
 
 export interface UserUsageTrendPoint {

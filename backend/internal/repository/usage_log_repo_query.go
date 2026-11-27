@@ -232,6 +232,8 @@ func usageLogOrderBy(params pagination.PaginationParams) string {
 	switch sortBy {
 	case "model":
 		column = "COALESCE(NULLIF(TRIM(requested_model), ''), model)"
+	case "traffic":
+		column = "COALESCE(usage_log_total_traffic_bytes(traffic), 0)"
 	case "created_at":
 		column = "created_at"
 	default:
